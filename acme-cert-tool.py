@@ -195,13 +195,18 @@ class HTTPResponse:
 		for k,v in it.chain( zip(self.__slots__, it.repeat(None)),
 			zip(self.__slots__, args), kws.items() ): setattr(self, k, v)
 
-def signed_req_body( acc_key, payload,
+def signed_req_body( acc_key, payload, kid=None,
 		nonce=None, url=None, resource=None, encode=True ):
-	protected = dict(alg=acc_key.jws_alg, jwk=acc_key.jwk, url=url)
+	# For all of the boulder-specific quirks implemented here, see:
+	#  letsencrypt/boulder/blob/d26a54b/docs/acme-divergences.md
+	kid = None # 2017-02-03: for letsencrypt/boulder, always requires jwk
+	protected = dict(alg=acc_key.jws_alg, url=url)
+	if not kid: protected['jwk'] = acc_key.jwk
+	else: protected['kid'] = kid
 	if nonce: protected['nonce'] = nonce
 	if url: protected['url'] = url
 	protected = b64_b2a_jose(json.dumps(protected))
-	# "resource" is for letsencrypt/boulder/blob/d26a54b/docs/acme-divergences.md#section-541
+	# 2017-02-03: "resource" is for letsencrypt/boulder
 	if ( resource and isinstance(payload, dict)
 		and 'resource' not in payload ): payload['resource'] = resource
 	if not isinstance(payload, str):
@@ -213,9 +218,10 @@ def signed_req_body( acc_key, payload,
 	if encode: body = json.dumps(body).encode()
 	return body
 
-def signed_req(acc_key, url, payload, nonce=None, resource=None, acme_url=None):
+def signed_req( acc_key, url, payload, kid=None,
+		nonce=None, resource=None, acme_url=None ):
 	url_full = url if ':' in url else None
-	if not url_full or not nonce:
+	if not url_full or not nonce: # XXX: use HEAD /acme/new-nonce
 		assert acme_url, [url, acme_url] # need to query directory
 		log.debug('Sending acme-directory http request to: {!r}', acme_url)
 		with urlopen(acme_url) as r:
@@ -225,11 +231,11 @@ def signed_req(acc_key, url, payload, nonce=None, resource=None, acme_url=None):
 		if not url_full: url_full = acme_dir[url]
 		if not resource: resource = url
 	body = signed_req_body( acc_key, payload,
-		nonce=nonce, url=url_full, resource=resource )
+		kid=kid, nonce=nonce, url=url_full, resource=resource )
 	log.debug('Sending signed http request to URL: {!r} ...', url_full)
 	req = Request( url_full, body,
 		{ 'Content-Type': 'application/jose+json',
-			'User-Agent': 'acme-auth-tool/1.0 (+https://github.com/mk-fg/fgtk/#acme-auth-tool)' } )
+			'User-Agent': 'acme-cert-tool/1.0 (+https://github.com/mk-fg/acme-cert-tool)' } )
 	try:
 		try: r = urlopen(req)
 		except HTTPError as err: r = err
@@ -354,7 +360,6 @@ def main(args=None):
 	log.debug( 'Using {} domain key: {} (acme acc url: {})',
 		acc_key.t, acc_key.pk_hash, acc_meta.get('acc.url') )
 
-	acme_url_req = ft.partial(signed_req, acc_key, acme_url=acme_url)
 	print_req_err_info = lambda: p_err(
 		'Server response: {} {}{}{}', res.code or '-', res.reason or '-', '\n' if res.body else '',
 		''.join('  {}'.format(line) for line in res.body.decode().splitlines(keepends=True)) )
@@ -397,7 +402,7 @@ def main(args=None):
 
 		if not acc_key_old: # new-reg
 			if acc_contact: payload_reg['contact'] = [acc_contact]
-			res = acme_url_req('new-reg', payload_reg)
+			res = signed_req(acc_key, 'new-reg', payload_reg, acme_url=acme_url)
 			if res.code not in [201, 409]:
 				p_err('ERROR: ACME new-reg (key registration) request failed')
 				return print_req_err_info()
@@ -411,6 +416,9 @@ def main(args=None):
 				url, nonce = acme_dir[resource], r.headers['Replay-Nonce']
 			payload = dict(account=acc_url_old, newKey=acc_key.jwk)
 			payload = signed_req_body(acc_key, payload, url=url, encode=False)
+			# According to https://tools.ietf.org/html/draft-ietf-acme-acme-04#section-5.2 ,
+			#  only new-reg and revoke-cert should have jwk instead of kid,
+			#  but 6.3.2 explicitly mentions jwks, so guess it should also be exception here.
 			res = signed_req(acc_key_old, url, payload, nonce=nonce, resource=resource)
 			if res.code not in [200, 201, 202]:
 				p_err('ERROR: ACME key-change request failed')
@@ -421,14 +429,18 @@ def main(args=None):
 		acc_meta.save_to_key_file(p_acc_key)
 
 	if acc_contact and acc_contact != acc_meta.get('acc.contact'):
-		res = acme_url_req( acc_meta['acc.url'],
-			dict(resource='reg', contact=[acc_contact]) )
+		res = signed_req( acc_key, acc_meta['acc.url'],
+			dict(resource='reg', contact=[acc_contact]),
+			kid=acc_meta['acc.url'], acme_url=acme_url )
 		if res.code not in [200, 201, 202]:
 			p_err('ERROR: ACME contact info update request failed')
 			return print_req_err_info()
 		log.debug('Account contact info updated: {!r} -> {!r}', acc_meta['acc.contact'], acc_contact)
 		acc_meta['acc.contact'] = acc_contact
 		acc_meta.save_to_key_file(p_acc_key)
+
+	acme_url_req = ft.partial( signed_req,
+		acc_key, acme_url=acme_url, kid=acc_meta['acc.url'] )
 
 
 	### Handle commands
