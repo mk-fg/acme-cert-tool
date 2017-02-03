@@ -321,6 +321,9 @@ def main(args=None):
 
 	cmd = cmds.add_parser('account-info',
 		help='Request and print info for ACME account associated with the specified key.')
+	cmd = cmds.add_parser('account-deactivate',
+		help='Deactivate (block/remove) ACME account'
+			' associated with the key. It cannot be reactivated again.')
 
 	cmd = cmds.add_parser('verify-domain',
 		help='Verify (and optionally register) --account-key for specified domain(s).')
@@ -449,6 +452,13 @@ def main(args=None):
 		res = acme_url_req(acc_meta['acc.url'], dict(resource='reg'))
 		if res.code not in [200, 201, 202]:
 			p_err('ERROR: ACME account info request failed')
+			return print_req_err_info()
+		p(res.body.decode())
+
+	elif opts.call == 'account-deactivate':
+		res = acme_url_req(acc_meta['acc.url'], dict(resource='reg', status='deactivated'))
+		if res.code != 200:
+			p_err('ERROR: ACME account deactivation request failed')
 			return print_req_err_info()
 		p(res.body.decode())
 
