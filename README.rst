@@ -14,8 +14,8 @@ authorization stuff.
 
 - Does not use openssl cli tools nor ever needs user to call them.
 
-- Designed with automated "setup and forget" operation in mind,
-  all with a single command if possible.
+- Designed with automated non-interactive "setup cert, auto-renewal and forget"
+  operation in mind, all with a single command if possible.
 
 - Does not do anything with httpd or any other daemons and their configuration.
 

@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft
 import os, sys, stat, tempfile, pathlib, contextlib, logging, re
-import math, base64, hashlib, json
+import time, math, base64, hashlib, json, email.utils
 
 from urllib.request import urlopen, Request, URLError, HTTPError
 
@@ -75,10 +75,10 @@ def b64_b2a_jose(data, uint_len=None):
 
 
 class AccKey:
-	__slots__ = 't sk pk_hash jwk jws_alg sign_func'.split()
+	_slots = 't sk pk_hash jwk jwk_thumbprint jws_alg sign_func'.split()
 	def __init__(self, *args, **kws):
-		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
-		self.jwk = self._jwk()
+		for k,v in it.chain(zip(self._slots, args), kws.items()): setattr(self, k, v)
+		self.jwk, self.jwk_thumbprint = self._jwk()
 		self.jws_alg, self.sign_func = self._sign_func()
 		self.pk_hash = self._pk_hash() # only used to id keys in this script
 
@@ -86,21 +86,21 @@ class AccKey:
 		# https://tools.ietf.org/html/rfc7517 + rfc7518
 		pk_nums = self.sk.public_key().public_numbers()
 		if self.t == 'rsa-4096':
-			return dict( kty='RSA',
+			jwk = dict( kty='RSA',
 				n=b64_b2a_jose(pk_nums.n, True),
 				e=b64_b2a_jose(pk_nums.e, True) )
 		elif self.t == 'ec-384':
-			return dict( kty='EC', crv='P-384',
+			jwk = dict( kty='EC', crv='P-384',
 				x=b64_b2a_jose(pk_nums.x, 48),
 				y=b64_b2a_jose(pk_nums.y, 48) )
 		else: raise ValueError(self.t)
+		digest = hashes.Hash(hashes.SHA256(), default_backend())
+		digest.update(json.dumps(jwk, sort_keys=True, separators=(',', ':')).encode())
+		return jwk, b64_b2a_jose(digest.finalize())
 
 	def _pk_hash(self, trunc_len=8):
 		digest = hashes.Hash(hashes.SHA256(), default_backend())
-		pk_jwa_str = '\0'.join('\0'.join(kv) for kv in sorted(
-			(k, b64_b2a_jose(n, True) if isinstance(n ,int) else n)
-			for k, n in self.jwk.items() ))
-		digest.update('\0'.join([self.t, *pk_jwa_str]).encode())
+		digest.update('\0'.join([self.t, self.jwk_thumbprint]).encode())
 		return b64_b2a_jose(digest.finalize())[:trunc_len]
 
 	def _sign_func(self):
@@ -195,6 +195,21 @@ class HTTPResponse:
 		for k,v in it.chain( zip(self.__slots__, it.repeat(None)),
 			zip(self.__slots__, args), kws.items() ): setattr(self, k, v)
 
+http_req_headers = { 'Content-Type': 'application/jose+json',
+		'User-Agent': 'acme-cert-tool/1.0 (+https://github.com/mk-fg/acme-cert-tool)' }
+
+def http_req(url, data=None, headers=None, **req_kws):
+	req_headers = http_req_headers.copy()
+	if headers: req_headers.update(headers)
+	req = Request(url, data, req_headers, **req_kws)
+	try:
+		try: r = urlopen(req)
+		except HTTPError as err: r = err
+		res = HTTPResponse(r.getcode(), r.reason, r.headers, r.read())
+		r.close()
+	except URLError as r: res = HTTPResponse(reason=r.reason)
+	return res
+
 def signed_req_body( acc_key, payload, kid=None,
 		nonce=None, url=None, resource=None, encode=True ):
 	# For all of the boulder-specific quirks implemented here, see:
@@ -221,7 +236,9 @@ def signed_req_body( acc_key, payload, kid=None,
 def signed_req( acc_key, url, payload, kid=None,
 		nonce=None, resource=None, acme_url=None ):
 	url_full = url if ':' in url else None
-	if not url_full or not nonce: # XXX: use HEAD /acme/new-nonce
+	if not url_full or not nonce:
+		# 2017-02-03: letsencrypt/boulder does not implement
+		#  new-nonce, so query directory instead, when it is needed.
 		assert acme_url, [url, acme_url] # need to query directory
 		log.debug('Sending acme-directory http request to: {!r}', acme_url)
 		with urlopen(acme_url) as r:
@@ -233,16 +250,8 @@ def signed_req( acc_key, url, payload, kid=None,
 	body = signed_req_body( acc_key, payload,
 		kid=kid, nonce=nonce, url=url_full, resource=resource )
 	log.debug('Sending signed http request to URL: {!r} ...', url_full)
-	req = Request( url_full, body,
-		{ 'Content-Type': 'application/jose+json',
-			'User-Agent': 'acme-cert-tool/1.0 (+https://github.com/mk-fg/acme-cert-tool)' } )
-	try:
-		try: r = urlopen(req)
-		except HTTPError as err: r = err
-		res = HTTPResponse(r.getcode(), r.reason, r.headers, r.read())
-		r.close()
-	except URLError as r: res = HTTPResponse(reason=r.reason)
-	log.debug('... http reponse: {} {}', res.code or '-', res.reason)
+	res = http_req(url_full, body)
+	log.debug('... http reponse: {} {}', res.code or '-', res.reason or '?')
 	return res
 
 
@@ -329,6 +338,13 @@ def main(args=None):
 		help='Verify (and optionally register) --account-key for specified domain(s).')
 	cmd.add_argument('domain', nargs='+',
 		help='Domain(s) to authenticate with specified key (--account-key).')
+	cmd.add_argument('--dont-query-local-httpd', action='store_true',
+		help='Skip querying challege response at a local'
+				' "well-known" URLs created by this script before submitting them to ACME CA.'
+			' Default is to query e.g. "example.com/.well-known/acme-challenge/some-token" URL'
+				' immediately after script creates "some-token" file in -d/--acme-dir directory,'
+				' to make sure it would be accessible to ACME CA servers as well.'
+			' Can be skipped in configurations where local host should not be able to query that URL.')
 
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -363,9 +379,10 @@ def main(args=None):
 	log.debug( 'Using {} domain key: {} (acme acc url: {})',
 		acc_key.t, acc_key.pk_hash, acc_meta.get('acc.url') )
 
-	print_req_err_info = lambda: p_err(
-		'Server response: {} {}{}{}', res.code or '-', res.reason or '-', '\n' if res.body else '',
-		''.join('  {}'.format(line) for line in res.body.decode().splitlines(keepends=True)) )
+	indent_lines = lambda text,indent='  ',prefix='\n': ( (prefix if text else '') +
+		''.join('{}{}'.format(indent, line) for line in text.splitlines(keepends=True)) )
+	print_req_err_info = lambda: p_err( 'Server response: {} {}{}',
+		res.code or '-', res.reason or '-', indent_lines(res.body.decode()) )
 
 
 	### Handle account status
@@ -462,14 +479,71 @@ def main(args=None):
 			return print_req_err_info()
 		p(res.body.decode())
 
-	elif opts.call == 'verify-domain': pass
-		# for domain in opts.domain:
-		# 	log.info('Verifying domain: {!r}', domain)
-		# 	res = acme_url_req('new-authz', dict(identifier=dict(type='dns', value=domain)))
-		# 	if res.code != 201:
-		# 		p_err('ERROR: ACME new-authz request failed for domain: {!r}', domain)
-		# 		return print_req_err_info()
-		# 	res.body
+
+	elif opts.call == 'verify-domain':
+		for domain in opts.domain:
+			log.info('Authorizing access to domain: {!r}', domain)
+			res = acme_url_req('new-authz', dict(identifier=dict(type='dns', value=domain)))
+			if res.code != 201:
+				p_err('ERROR: ACME new-authz request failed for domain: {!r}', domain)
+				return print_req_err_info()
+
+			for ch in json.loads(res.body.decode())['challenges']:
+				if ch['type'] == 'http-01': break
+			else:
+				p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
+				return p_err('Challenge-offer JSON:{}', indent_lines(res.body.decode()))
+			token = ch['token']
+			if re.search(r'[^\w\d_\-]', token):
+				return p_err( 'ERROR: Refusing to create path for'
+					' non-alphanum/b64 token value (security issue): {!r}', token )
+			key_authz = '{}.{}'.format(token, acc_key.jwk_thumbprint)
+			p_token = p_acme_dir / token
+			with safe_replacement(p_token) as dst: dst.write(key_authz)
+
+			# XXX: hook-script to run for delay/publish here
+
+			if not opts.dont_query_local_httpd:
+				url = 'http://{}/.well-known/acme-challenge/{}'.format(domain, token)
+				res = http_req(url)
+				if not (res.code == 200 and res.body.decode() == key_authz):
+					return p_err( 'ERROR: Token-file created in'
+						' -d/--acme-dir is not available at domain URL: {}', url )
+
+			res = acme_url_req( ch['uri'],
+				dict(resource='challenge', type='http-01', keyAuthorization=key_authz) )
+			if res.code not in [200, 202]:
+				p_err('ERROR: http-01 challenge response was not accepted')
+				return print_req_err_info()
+
+			# XXX: hook-script to run for delay here
+
+			while True: # XXX: timeout or other limit
+				res = http_req(ch['uri'])
+				if res.code in [200, 202]:
+					status = json.loads(res.body.decode())['status']
+					if status == 'invalid':
+						p_err('ERROR: http-01 challenge response was rejected by ACME CA')
+						return print_req_err_info()
+					if status == 'valid': break
+				elif res.code != 503:
+					p_err('ERROR: http-01 challenge-status-poll request failed')
+					return print_req_err_info()
+				retry_delay = res.headers.get('Retry-After')
+				if retry_delay:
+					if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
+					else:
+						retry_delay = email.utils.parsedate_to_datetime(retry_delay)
+						if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
+					retry_delay = max(0, retry_delay)
+				if not retry_delay: retry_delay = 2.0 # XXX: configurable, backoff
+				time.sleep(retry_delay)
+			p_token.unlink()
+
+			# XXX: hook-script to run after auth here?
+
+			log.info('Authorized access to domain: {!r}', domain)
+
 
 	elif not opts.call: parser.error('No command specified')
 	else: parser.error('Unrecognized command: {!r}'.format(opts.call))
