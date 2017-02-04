@@ -8,8 +8,9 @@ from urllib.request import urlopen, Request, URLError, HTTPError
 
 import cryptography # cryptography.io
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding, rsa, ec
+from cryptography.hazmat.backends import default_backend
+crypto_backend = default_backend()
 
 
 acme_ca_shortcuts = dict(
@@ -73,6 +74,15 @@ def b64_b2a_jose(data, uint_len=None):
 	if isinstance(data, str): data = data.encode()
 	return base64.urlsafe_b64encode(data).replace(b'=', b'').decode()
 
+def generate_crypto_key(key_type):
+	if key_type.startswith('rsa-'):
+		key_bits = int(key_type[4:])
+		if key_bits not in [2048, 4096]: return
+		return rsa.generate_private_key(65537, key_bits, crypto_backend)
+	elif key_type.startswith('ec-'):
+		if key_type != 'ec-384': return
+		return ec.generate_private_key(ec.SECP384R1(), crypto_backend)
+
 
 class AccKey:
 	_slots = 't sk pk_hash jwk jwk_thumbprint jws_alg sign_func'.split()
@@ -85,7 +95,7 @@ class AccKey:
 	def _jwk(self):
 		# https://tools.ietf.org/html/rfc7517 + rfc7518
 		pk_nums = self.sk.public_key().public_numbers()
-		if self.t == 'rsa-4096':
+		if self.t.startswith('rsa-'):
 			jwk = dict( kty='RSA',
 				n=b64_b2a_jose(pk_nums.n, True),
 				e=b64_b2a_jose(pk_nums.e, True) )
@@ -94,12 +104,12 @@ class AccKey:
 				x=b64_b2a_jose(pk_nums.x, 48),
 				y=b64_b2a_jose(pk_nums.y, 48) )
 		else: raise ValueError(self.t)
-		digest = hashes.Hash(hashes.SHA256(), default_backend())
+		digest = hashes.Hash(hashes.SHA256(), crypto_backend)
 		digest.update(json.dumps(jwk, sort_keys=True, separators=(',', ':')).encode())
 		return jwk, b64_b2a_jose(digest.finalize())
 
 	def _pk_hash(self, trunc_len=8):
-		digest = hashes.Hash(hashes.SHA256(), default_backend())
+		digest = hashes.Hash(hashes.SHA256(), crypto_backend)
 		digest.update('\0'.join([self.t, self.jwk_thumbprint]).encode())
 		return b64_b2a_jose(digest.finalize())[:trunc_len]
 
@@ -131,13 +141,7 @@ class AccKey:
 
 	@classmethod
 	def generate_to_file(cls, p_acc_key, key_type, file_mode=None):
-		acc_key = acc_key_t = None
-		if key_type.startswith('rsa-'):
-			if key_type != 'rsa-4096': return
-			acc_key = rsa.generate_private_key(65537, 4096, default_backend())
-		elif key_type.startswith('ec-'):
-			if key_type != 'ec-384': return
-			acc_key = ec.generate_private_key(ec.SECP384R1(), default_backend())
+		acc_key = generate_crypto_key(key_type)
 		if acc_key:
 			acc_key_pem = acc_key.private_bytes(
 				serialization.Encoding.PEM,
@@ -151,9 +155,10 @@ class AccKey:
 	@classmethod
 	def load_from_file(cls, p_acc_key):
 		acc_key = serialization.load_pem_private_key(
-			p_acc_key.read_bytes(), None, default_backend() )
-		if isinstance(acc_key, rsa.RSAPrivateKey)\
-			and acc_key.key_size == 4096: acc_key_t = 'rsa-4096'
+			p_acc_key.read_bytes(), None, crypto_backend )
+		if isinstance(acc_key, rsa.RSAPrivateKey):
+			assert acc_key.key_size in [2048, 4096]
+			acc_key_t = 'rsa-{}'.format(acc_key.key_size)
 		elif isinstance(acc_key, ec.EllipticCurvePrivateKey)\
 			and acc_key.curve.name == 'secp384r1': acc_key_t = 'ec-384'
 		else: return None
@@ -256,6 +261,12 @@ def signed_req( acc_key, url, payload, kid=None,
 	return res
 
 
+class X509CertInfo:
+	__slots__ = 'key csr cert_str'.split()
+	def __init__(self, *args, **kws):
+		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
+
+
 def main(args=None):
 	import argparse, textwrap
 
@@ -297,9 +308,9 @@ def main(args=None):
 		help='Generate new ACME authentication'
 			' key regardless of whether -k/--account-key-file path exists.')
 	group.add_argument('-t', '--key-type',
-		metavar='type', choices=['rsa-4096', 'ec-384'], default='ec-384',
+		metavar='type', choices=['rsa-2048', 'rsa-4096', 'ec-384'], default='ec-384',
 		help='ACME authentication key type to generate.'
-			' Possible values: rsa-4096, ec-384 (secp384r1). Default: %(default)s')
+			' Possible values: rsa-2048, rsa-4096, ec-384 (secp384r1). Default: %(default)s')
 
 	group = parser.add_argument_group('Account/key registration and update options')
 	group.add_argument('-r', '--register', action='store_true',
@@ -343,10 +354,11 @@ def main(args=None):
 		description='One per line to stdout, from local metadata only.')
 
 	cmd = cmds.add_parser('domain-auth',
+		formatter_class=SmartHelpFormatter,
 		help='Authorize use of key (-k/--account-key-file) to manage certs for specified domain(s).')
 	cmd.add_argument('acme_dir', help=textwrap.dedent('''\
-			Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
-			Will be created, if does not exist already.'''))
+		Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
+		Will be created, if does not exist already.'''))
 	cmd.add_argument('domain', nargs='+',
 		help='Domain(s) to authorize for use with specified key (-k/--account-key-file).')
 	cmd.add_argument('--dont-query-local-httpd', action='store_true',
@@ -356,7 +368,7 @@ def main(args=None):
 				' immediately after script creates "some-token" file in acme_dir directory,'
 				' to make sure it would be accessible to ACME CA servers as well.'
 			' Can be skipped in configurations where local host should not be able to query that URL.')
-	group.add_argument('-c', '--challenge-file-mode', metavar='octal', default='0644',
+	cmd.add_argument('-m', '--challenge-file-mode', metavar='octal', default='0644',
 		help='Separate access mode (octal) value to use for ACME challenge file in acme_dir directory.'
 			' Default is 0644 to allow read access for any uid (e.g. httpd) to these files.')
 
@@ -365,35 +377,68 @@ def main(args=None):
 
 
 	cmd = cmds.add_parser('cert-issue',
+		formatter_class=SmartHelpFormatter,
 		help='Generate new X.509 v3 (TLS) certificate/key pair'
 			' for specified domain(s), with cert signed by ACME CA.')
-	cmd.add_argument('file_prefix',
+
+	group = cmd.add_argument_group('Certificate key and files')
+	group.add_argument('file_prefix',
 		help='Resulting PEM filename or filename prefix'
 			' (if >1 files/certs are requested, see options below).')
-	cmd.add_argument('domain',
-		help='Main domain to issue certificate for.'
-			' Will be used in a certificate Common Name field (CN), and SubjectAltName.')
-	cmd.add_argument('altname', nargs='*',
-		help='Extra domain(s) that certificate should be valid for.'
-			' Will be used in a certificate SubjectAltName extension field.')
-	cmd.add_argument('-c', '--cert-key-type',
-		metavar='type', choices=['rsa-4096', 'ec-384'], default='ec-384',
-		help='Cert key to generate.'
-			' Possible values: rsa-4096, ec-384 (secp384r1). Default: %(default)s')
-	cmd.add_argument('-2', '--two-certs', action='store_true',
-		help='Generate rsa cert in addition to ec, so that'
-				' both can be used in case client can\' work with ecc.'
-			' Filename suffixes will correspond to cert type, with an extra dot appended'
-				' if prefix does not end with one, e.g. "mycert.ec-384" and "mycert.rsa-4096".')
-	cmd.add_argument('-s', '--split-key-file', action='store_true',
+	group.add_argument('-c', '--cert-key-type',
+		metavar='type', choices=['rsa-2048', 'rsa-4096', 'ec-384'], default='ec-384',
+		help=textwrap.dedent('''\
+			Certificate key type(s) to generate.
+			Can be used multiple times to issue same certificate for
+			 multiple different keys, e.g. ec-384 cert and a fallback
+			 rsa-2048 one for (rare) clients that do not support ecc.
+			If more than one key type is specified, each cert/key
+			 pair will be stored to different .pem file(s), with corresponding filename
+			 suffixes and an extra dot separator (if prefix does not end with one),
+			 e.g. "mycert.ec-384.pem" and "mycert.rsa-2048.pem".
+			Possible values: rsa-2048, rsa-4096, ec-384 (secp384r1). Default: %(default)s'''))
+	group.add_argument('-s', '--split-key-file', action='store_true',
 		help='Store private key in a separate .key file, while certificate to a .crt file, both'
 				' with specified filename prefix plus a dot separator, e.g. "mycert.crt" + "mycert.key".'
 			' Default is to store both cert and key in the same (specified) file.')
-	cmd.add_argument('-r', '--remove-files-for-prefix', action='store_true',
+	group.add_argument('-r', '--remove-files-for-prefix', action='store_true',
 		help='After storing new cert/key files, remove all files with specified prefix'
 			' that were there previously. Only done after successful operation,'
 			' idea is to cleanup any old files to avoid confusion.')
 
+	group = cmd.add_argument_group('Certificate info')
+	group.add_argument('domain',
+		help='Main domain to issue certificate for.'
+			' Will be used in a certificate Common Name field (CN) and SubjectAltName.')
+	group.add_argument('altname', nargs='*',
+		help='Extra domain(s) that certificate should be valid for.'
+			' Will be used in a certificate SubjectAltName extension field.')
+	group.add_argument('-i', '--cert-subject-info',
+		action='append', metavar='attr=value', help=textwrap.dedent('''\
+			Additional subject info to include in the X.509 Name, in attr=value format.
+			This option can be used multiple times, attributes
+			 will be added in the same order with CN from "domain" arg at the end.
+			See list of recognized "attr" names (case-insensitive) in cryptography.io docs:
+			 https://cryptography.io/en/latest/x509/reference/#object-identifiers
+			For example, to have country and email attrs in the cert, use:
+			 -i country_name=US -i  email_address=user@myhost.com'''))
+
+	group = cmd.add_argument_group('Certificate domain authorization options',
+		description='Options for automatic authorization of'
+			' domain(s) used in a certificate, same as in "domain-auth" command.')
+	group.add_argument('--acme-dir', help=textwrap.dedent('''\
+		Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
+		Must be specified in order for authomatic
+		 authorization for cert domain(s) to be performed.
+		If not specified, domains are assumed to be pre-authorized.
+		Will be created, if does not exist already.'''))
+	group.add_argument('--dont-query-local-httpd', action='store_true',
+		help='Skip querying challege response at a local'
+				' "well-known" URLs created by this script before submitting them to ACME CA.'
+			' See more info in the description of this option for "domain-auth" command.')
+	group.add_argument('-m', '--challenge-file-mode', metavar='octal', default='0644',
+		help='Separate access mode (octal) value to use for ACME challenge file in acme_dir directory.'
+			' Default is 0644 to allow read access for any uid (e.g. httpd) to these files.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
@@ -416,7 +461,7 @@ def main(args=None):
 	if opts.gen_key or (opts.gen_key_if_missing and not p_acc_key.exists()):
 		acc_key = AccKey.generate_to_file(p_acc_key, opts.key_type, file_mode=file_mode)
 		if not acc_key:
-			parser.error('Unknown/unsupported --key-type type value: {!r}'.format(opts.key_type))
+			parser.error('Unknown/unsupported --key-type value: {!r}'.format(opts.key_type))
 	elif p_acc_key.exists():
 		acc_key = AccKey.load_from_file(p_acc_key)
 		if not acc_key: parser.error('Unknown/unsupported key type: {}'.format(p_acc_key))
@@ -642,9 +687,72 @@ def main(args=None):
 
 
 	elif opts.call == 'cert-issue':
-		# XXX: file_prefix, domain, altname, cert_key_type,
-		#  two_certs, split_key_file, remove_files_for_prefix
-		pass
+		from cryptography import x509
+		from cryptography.x509.oid import NameOID
+
+		p_cert_base = pathlib.Path(opts.file_prefix)
+		p_cert_dir, p_cert_base = p_cert_base.parent, p_cert_base.name
+		cert_domain_list = [opts.domain] + (opts.altname or list())
+		# XXX: authorize domain(s)
+
+		csr = x509.CertificateSigningRequestBuilder()
+		csr_name = list()
+		for v in opts.cert_subject_info or list():
+			if '=' not in v:
+				parser.error( 'Invalid --cert-subject-info'
+					' spec (must be attr=value): {!r}'.format(v) )
+			k, v = v.split('=', 1)
+			csr_name.append(x509.NameAttribute(getattr(NameOID, k.upper()), v))
+		csr_name.append(x509.NameAttribute(NameOID.COMMON_NAME, opts.domain))
+		csr = csr.subject_name(x509.Name(csr_name))
+		csr = csr.add_extension(x509.SubjectAlternativeName(
+			list(map(x509.DNSName, cert_domain_list)) ), critical=False)
+
+		certs = opts.cert_key_type
+		if isinstance(certs, str): certs = [certs]
+		certs = dict((k, X509CertInfo()) for k in certs)
+		for key_type, ci in certs.items():
+			log.debug('Generating {} key for certificate...', key_type)
+			ci.key = generate_crypto_key(key_type)
+			if not ci.key:
+				parser.error('Unknown/unsupported --cert-key-type value: {!r}'.format(key_type))
+			ci.csr = csr.sign(ci.key, hashes.SHA256(), crypto_backend)
+
+		for key_type, ci in certs.items():
+			csr_der = ci.csr.public_bytes(serialization.Encoding.DER)
+			res = acme_url_req('new-cert', dict(csr=b64_b2a_jose(csr_der)))
+			if res.code != 201:
+				p_err('ERROR: Failed to get signed cert from ACME CA', domain)
+				return print_req_err_info()
+			ci.cert_str = '-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n'\
+				.format('\n'.join(textwrap.wrap(base64.b64encode(res.body).decode(), 64)))
+			log.debug('Signed {} certificate', key_type)
+
+		files_used = set()
+		key_type_suffix, key_split = len(certs) > 1, opts.split_key_file
+		for key_type, ci in certs.items():
+			key_str = ci.key.private_bytes( serialization.Encoding.PEM,
+				serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption() ).decode()
+			p = p_cert_base
+			if key_type_suffix:
+				p = '{}.{}'.format(p.rstrip('.'), key_type)
+				if not key_split: p += '.pem'
+			p_cert, p_key = (p, None) if not key_split else\
+				('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key'])
+			with safe_replacement(p_cert_dir / p_cert, mode=file_mode) as dst:
+				dst.write(ci.cert_str)
+				if not p_key: dst.write(key_str)
+			if p_key:
+				with safe_replacement(p_cert_dir / p_key, mode=file_mode) as dst: dst.write(key_str)
+			files_used.update((p_cert, p_key))
+			log.info( 'Stored {} certificate/key: {}{}',
+				key_type, p_cert, ' / {}'.format(p_key) if p_key else '' )
+
+		if opts.remove_files_for_prefix:
+			for p in p_cert_dir.iterdir():
+				if p.is_dir() or p.name in files_used: continue
+				log.debug('Removing unused matching-prefix file: {}', p.name)
+				p.unlink()
 
 
 	elif not opts.call: parser.error('No command specified')
