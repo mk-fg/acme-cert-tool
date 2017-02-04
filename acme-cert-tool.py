@@ -443,8 +443,34 @@ def main(args=None):
 	parser = argparse.ArgumentParser(
 		formatter_class=SmartHelpFormatter,
 		description='Lets Encrypt CA interaction tool to make'
-			' it authorize domain and sign/renew/revoke TLS certs.')
-	# XXX: add usage examples maybe
+			' it authorize domain and sign/renew/revoke TLS certs.',
+		epilog=textwrap.dedent('''
+			Usage examples:
+
+			  - Generate/register new account key, generate certificate for "mydomain.com"
+			    and authorize/sign it with Let's Encrypt "Fake LE Intermediate X1" staging CA:
+
+			      % ./acme-cert-tool.py --debug -gk le-staging.acc.key \\
+			          cert-issue le-staging.cert.pem mydomain.com
+
+			    EC P-384 (default) account key (along with some metadata, as comments) will be
+			    stored in "le-staging.acc.key" file, certificate and its key (also P-384 by default)
+			    in "le-staging.cert.pem".
+
+			    Can be run again to generate new certificate with the same account key and
+			    domain authorization (-g/--gen-key-if-missing does not regen key files).
+
+			    To use non-staging server with "legit" intermediate (be sure to check ToS
+			    and limits first!), simply add "-s le" there.
+
+			  - Update account contact email and print some account info:
+			      % ./acme-cert-tool.py -k le-staging.acc.key -e me@mydomain.com account-info
+
+			  - Deactivate (remove) account:
+			      % ./acme-cert-tool.py -k le-staging.acc.key account-deactivate
+
+			See more info at: https://github.com/mk-fg/acme-cert-tool
+		'''))
 
 	group = parser.add_argument_group('ACME authentication')
 	group.add_argument('-k', '--account-key-file',
