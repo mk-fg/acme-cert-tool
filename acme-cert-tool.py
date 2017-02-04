@@ -450,8 +450,8 @@ def main(args=None):
 			  - Generate/register new account key, generate certificate for "mydomain.com"
 			    and authorize/sign it with Let's Encrypt "Fake LE Intermediate X1" staging CA:
 
-			      % ./acme-cert-tool.py --debug -gk le-staging.acc.key \\
-			          cert-issue le-staging.cert.pem mydomain.com
+			      % ./acme-cert-tool.py --debug -gk le-staging.acc.key cert-issue \\
+			          -d /srv/www/.well-known/acme-challenge le-staging.cert.pem mydomain.com
 
 			    EC P-384 (default) account key (along with some metadata, as comments) will be
 			    stored in "le-staging.acc.key" file, certificate and its key (also P-384 by default)
@@ -616,7 +616,7 @@ def main(args=None):
 	group = cmd.add_argument_group('Certificate domain authorization options',
 		description='Options for automatic authorization of'
 			' domain(s) used in a certificate, same as in "domain-auth" command.')
-	group.add_argument('--acme-dir', help=textwrap.dedent('''\
+	group.add_argument('-d', '--acme-dir', help=textwrap.dedent('''\
 		Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
 		Must be specified in order for authomatic
 		 authorization for cert domain(s) to be performed.

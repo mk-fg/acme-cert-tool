@@ -32,8 +32,8 @@ Usage example
 
 ::
 
-  % ./acme-cert-tool.py --debug -gk le-staging.acc.key \
-      cert-issue le-staging.cert.pem mydomain.com
+  % ./acme-cert-tool.py --debug -gk le-staging.acc.key cert-issue \
+      -d /srv/www/.well-known/acme-challenge le-staging.cert.pem mydomain.com
 
 EC P-384 (default) account key (along with some metadata, as comments)
 will be stored in "le-staging.acc.key" file, certificate and its key
@@ -46,7 +46,7 @@ To use non-staging server with "legit" intermediate
 (be sure to check ToS and limits first!), simply add "-s le" there.
 
 Run ``./acme-cert-tool.py -h`` to get more information on all supported commands
-and options and e.g. ``./acme-cert-tool.py cert-issue -h`` for info and options
+and options, and e.g. ``./acme-cert-tool.py cert-issue -h`` to see info and options
 for a specific command.
 
 
@@ -63,7 +63,7 @@ Download and run the script::
   % chmod +x acme-cert-tool.py
   % ./acme-cert-tool.py --help
 
-Unless some errors pop-up immediately, everything is installed and ready to use.
+Unless some errors pop-up immediately, everything is installed correctly and ready to use.
 
 There is no need to run this script as root, use -m/--mode, --challenge-file-mode
 options and ACLs (``setfacl -m d:...``) to share files between different uids/gids.
