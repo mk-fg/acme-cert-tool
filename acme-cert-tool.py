@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft
 import os, sys, stat, tempfile, pathlib, contextlib, logging, re
-import time, math, base64, hashlib, json, email.utils
+import time, math, base64, hashlib, json, email.utils, textwrap
 
 from urllib.request import urlopen, Request, URLError, HTTPError
 
@@ -52,6 +52,7 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 			try: os.unlink(tmp.name)
 			except OSError: pass
 
+
 def p(*a, file=None, end='\n', flush=False, **k):
 	if len(a) > 0:
 		fmt, a = a[0], a[1:]
@@ -60,7 +61,17 @@ def p(*a, file=None, end='\n', flush=False, **k):
 			else ([fmt] + list(a), k) )
 	print(*a, file=file, end=end, flush=flush, **k)
 
+indent_lines = lambda text,indent='  ',prefix='\n': ( (prefix if text else '') +
+	''.join('{}{}'.format(indent, line) for line in text.splitlines(keepends=True)) )
+
 p_err = lambda *a,**k: p(*a, file=sys.stderr, **k) or 1
+p_err_for_req = lambda res: p_err(
+	'Server response: {} {}\nHeaders: {}Body: {}',
+	res.code or '-', res.reason or '-',
+	indent_lines(''.join( '{}: {}\n'.format(k, v)
+		for k, v in (res.headers.items() if res.headers else list()) )),
+	indent_lines(res.body.decode()) )
+
 
 
 def b64_b2a_jose(data, uint_len=None):
@@ -169,9 +180,13 @@ class AccMeta(dict):
 
 	re_meta = re.compile(r'^\s*## acme\.(\S+?): (.*)?\s*$')
 
+	__slots__ = 'p mode'.split()
+	def __init__(self, *args, **kws):
+		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
+
 	@classmethod
-	def load_from_key_file(cls, p_acc_key):
-		self = cls()
+	def load_from_key_file(cls, p_acc_key, file_mode=None):
+		self = cls(p_acc_key, file_mode)
 		with p_acc_key.open() as src:
 			for line in src:
 				m = self.re_meta.search(line)
@@ -180,9 +195,9 @@ class AccMeta(dict):
 				self[k] = json.loads(v)
 		return self
 
-	def save_to_key_file(self, p_acc_key, file_mode=None):
-		with safe_replacement(p_acc_key, mode=file_mode) as dst:
-			with p_acc_key.open() as src:
+	def save(self):
+		with safe_replacement(self.p, mode=self.mode) as dst:
+			with self.p.open() as src:
 				final_newline = True
 				for line in src:
 					m = self.re_meta.search(line)
@@ -261,14 +276,161 @@ def signed_req( acc_key, url, payload, kid=None,
 	return res
 
 
+class AccSetup:
+	__slots__ = 'key meta req'.split()
+	def __init__(self, *args, **kws):
+		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
+
 class X509CertInfo:
 	__slots__ = 'key csr cert_str'.split()
 	def __init__(self, *args, **kws):
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
 
+def cmd_domain_auth( acc,
+		p_acme_dir, domain, token_mode=0o600, query_httpd=True ):
+	payload_domain = dict(identifier=dict(type='dns', value=domain))
+	res = acc.req('new-authz', payload_domain)
+	if res.code == 403:
+		try: tos_error = json.loads(res.body)['type'] == 'urn:acme:error:unauthorized'
+		except: tos_error = False
+		if tos_error:
+			log.debug(
+				'Got http-403 (error:unauthorized),'
+				' trying to update account ToS agreement' )
+			payload = payload_reg.copy()
+			payload['resource'] = 'reg'
+			res = acc.req(acc.meta['acc.url'], payload)
+			if res.code not in [200, 201, 202]:
+				p_err('ERROR: ACME account tos agreement update failed')
+				return p_err_for_req(res)
+			log.debug('Account ToS agreement updated, retrying new-authz')
+			res = acc.req('new-authz', payload_domain)
+	if res.code != 201:
+		p_err('ERROR: ACME new-authz request failed for domain: {!r}', domain)
+		return p_err_for_req(res)
+
+	for ch in json.loads(res.body.decode())['challenges']:
+		if ch['type'] == 'http-01': break
+	else:
+		p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
+		return p_err('Challenge-offer JSON:{}', indent_lines(res.body.decode()))
+	token, token_url, auth_url = ch['token'], ch['uri'], res.headers['Location']
+	if re.search(r'[^\w\d_\-]', token):
+		return p_err( 'ERROR: Refusing to create path for'
+			' non-alphanum/b64 token value (security issue): {!r}', token )
+	key_authz = '{}.{}'.format(token, acc.key.jwk_thumbprint)
+	p_token = p_acme_dir / token
+	with safe_replacement(p_token, mode=token_mode) as dst: dst.write(key_authz)
+
+	# XXX: hook-script to run for delay/publish here
+
+	if query_httpd:
+		url = 'http://{}/.well-known/acme-challenge/{}'.format(domain, token)
+		res = http_req(url)
+		if not (res.code == 200 and res.body.decode() == key_authz):
+			return p_err( 'ERROR: Token-file created in'
+				' -d/--acme-dir is not available at domain URL: {}', url )
+
+	res = acc.req( token_url,
+		dict(resource='challenge', type='http-01', keyAuthorization=key_authz) )
+	if res.code not in [200, 202]:
+		p_err('ERROR: http-01 challenge response was not accepted')
+		return p_err_for_req(res)
+
+	# XXX: hook-script to run for delay here
+
+	for n in range(1, 2**30): # XXX: timeout or other limit
+		log.debug('Polling domain access authorization [{:02d}]: {!r}', n, domain)
+		res = http_req(token_url)
+		if res.code in [200, 202]:
+			status = json.loads(res.body.decode())['status']
+			if status == 'invalid':
+				p_err('ERROR: http-01 challenge response was rejected by ACME CA')
+				return p_err_for_req(res)
+			if status == 'valid': break
+		elif res.code != 503:
+			p_err('ERROR: http-01 challenge-status-poll request failed')
+			return p_err_for_req(res)
+		retry_delay = res.headers.get('Retry-After')
+		if retry_delay:
+			if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
+			else:
+				retry_delay = email.utils.parsedate_to_datetime(retry_delay)
+				if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
+			retry_delay = max(0, retry_delay)
+		if not retry_delay: retry_delay = 2.0 # XXX: configurable, backoff
+		time.sleep(retry_delay)
+	p_token.unlink()
+
+	acc.meta['auth.domain:{}'.format(domain)] = auth_url
+	acc.meta.save()
+
+	# XXX: hook-script to run after auth here?
+
+
+def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
+		key_type_list, cert_domain_list, cert_name_attrs,
+		file_mode=0o600, split_key_file=False, remove_files_for_prefix=False ):
+	from cryptography import x509
+	from cryptography.x509.oid import NameOID
+
+	csr = x509.CertificateSigningRequestBuilder()
+	csr_name = list()
+	for k, v in cert_name_attrs:
+		csr_name.append(x509.NameAttribute(getattr(NameOID, k.upper()), v))
+	csr_name.append(x509.NameAttribute(
+		NameOID.COMMON_NAME, cert_domain_list[0] ))
+	csr = csr.subject_name(x509.Name(csr_name))
+	csr = csr.add_extension(x509.SubjectAlternativeName(
+		list(map(x509.DNSName, cert_domain_list)) ), critical=False)
+
+	certs = dict((k, X509CertInfo()) for k in key_type_list)
+	for key_type, ci in certs.items():
+		log.debug('Generating {} key for certificate...', key_type)
+		ci.key = generate_crypto_key(key_type)
+		if not ci.key:
+			parser.error('Unknown/unsupported --cert-key-type value: {!r}'.format(key_type))
+		ci.csr = csr.sign(ci.key, hashes.SHA256(), crypto_backend)
+
+	for key_type, ci in certs.items():
+		csr_der = ci.csr.public_bytes(serialization.Encoding.DER)
+		res = acc.req('new-cert', dict(csr=b64_b2a_jose(csr_der)))
+		if res.code != 201:
+			p_err('ERROR: Failed to get signed cert from ACME CA', domain)
+			return p_err_for_req(res)
+		ci.cert_str = '-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n'\
+			.format('\n'.join(textwrap.wrap(base64.b64encode(res.body).decode(), 64)))
+		log.debug('Signed {} certificate', key_type)
+
+	files_used, key_type_suffix = set(), len(certs) > 1
+	for key_type, ci in certs.items():
+		key_str = ci.key.private_bytes( serialization.Encoding.PEM,
+			serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption() ).decode()
+		p = p_cert_base
+		if key_type_suffix:
+			p = '{}.{}'.format(p.rstrip('.'), key_type)
+			if not split_key_file: p += '.pem'
+		p_cert, p_key = (p, None) if not split_key_file else\
+			('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key'])
+		with safe_replacement(p_cert_dir / p_cert, mode=file_mode) as dst:
+			dst.write(ci.cert_str)
+			if not p_key: dst.write(key_str)
+		if p_key:
+			with safe_replacement(p_cert_dir / p_key, mode=file_mode) as dst: dst.write(key_str)
+		files_used.update((p_cert, p_key))
+		log.info( 'Stored {} certificate/key: {}{}',
+			key_type, p_cert, ' / {}'.format(p_key) if p_key else '' )
+
+	if remove_files_for_prefix:
+		for p in p_cert_dir.iterdir():
+			if p.is_dir() or p.name in files_used: continue
+			log.debug('Removing unused matching-prefix file: {}', p.name)
+			p.unlink()
+
+
 def main(args=None):
-	import argparse, textwrap
+	import argparse
 
 	class SmartHelpFormatter(argparse.HelpFormatter):
 		def _fill_text(self, text, width, indent):
@@ -361,6 +523,8 @@ def main(args=None):
 		Will be created, if does not exist already.'''))
 	cmd.add_argument('domain', nargs='+',
 		help='Domain(s) to authorize for use with specified key (-k/--account-key-file).')
+	group.add_argument('-f', '--force', action='store_true',
+		help='Dont skip domains which are already recorded as authorized in local acc metadata.')
 	cmd.add_argument('--dont-query-local-httpd', action='store_true',
 		help='Skip querying challege response at a local'
 				' "well-known" URLs created by this script before submitting them to ACME CA.'
@@ -432,6 +596,8 @@ def main(args=None):
 		 authorization for cert domain(s) to be performed.
 		If not specified, domains are assumed to be pre-authorized.
 		Will be created, if does not exist already.'''))
+	group.add_argument('-f', '--force', action='store_true',
+		help='Dont skip domains which are already recorded as authorized in local acc metadata.')
 	group.add_argument('--dont-query-local-httpd', action='store_true',
 		help='Skip querying challege response at a local'
 				' "well-known" URLs created by this script before submitting them to ACME CA.'
@@ -466,18 +632,9 @@ def main(args=None):
 		acc_key = AccKey.load_from_file(p_acc_key)
 		if not acc_key: parser.error('Unknown/unsupported key type: {}'.format(p_acc_key))
 	else: parser.error('Specified --account-key-file path does not exists: {!r}'.format(p_acc_key))
-	acc_meta = AccMeta.load_from_key_file(p_acc_key)
+	acc_meta = AccMeta.load_from_key_file(p_acc_key, file_mode=file_mode)
 	log.debug( 'Using {} domain key: {} (acme acc url: {})',
 		acc_key.t, acc_key.pk_hash, acc_meta.get('acc.url') )
-
-	indent_lines = lambda text,indent='  ',prefix='\n': ( (prefix if text else '') +
-		''.join('{}{}'.format(indent, line) for line in text.splitlines(keepends=True)) )
-	print_req_err_info = lambda: p_err(
-		'Server response: {} {}\nHeaders: {}Body: {}',
-		res.code or '-', res.reason or '-',
-		indent_lines(''.join( '{}: {}\n'.format(k, v)
-			for k, v in (res.headers.items() if res.headers else list()) )),
-		indent_lines(res.body.decode()) )
 
 
 	### Handle account status
@@ -515,7 +672,7 @@ def main(args=None):
 				if res.code not in [201, 409]:
 					p_err('ERROR: ACME new-reg'
 						' request for old key (-o/--account-key-file-old) failed')
-					return print_req_err_info()
+					return p_err_for_req(res)
 				acc_url_old = res.headers['Location']
 
 		if not acc_key_old: # new-reg
@@ -523,7 +680,7 @@ def main(args=None):
 			res = signed_req(acc_key, 'new-reg', payload_reg, acme_url=acme_url)
 			if res.code not in [201, 409]:
 				p_err('ERROR: ACME new-reg (key registration) request failed')
-				return print_req_err_info()
+				return p_err_for_req(res)
 			log.debug('Account registration status: {} {}', res.code, res.reason)
 			acc_meta['acc.url'] = res.headers['Location']
 			if res.code == 201: acc_meta['acc.contact'] = acc_contact
@@ -540,11 +697,11 @@ def main(args=None):
 			res = signed_req(acc_key_old, url, payload, nonce=nonce, resource=resource)
 			if res.code not in [200, 201, 202]:
 				p_err('ERROR: ACME account key-change request failed')
-				return print_req_err_info()
+				return p_err_for_req(res)
 			log.debug('Account key-change success: {} -> {}', acc_key_old.pk_hash, acc_key.pk_hash)
 			acc_meta['acc.url'] = acc_url_old
 			acc_meta['acc.contact'] = acc_meta_old.get('acc.contact')
-		acc_meta.save_to_key_file(p_acc_key, file_mode=file_mode)
+		acc_meta.save()
 
 	if acc_contact and acc_contact != acc_meta.get('acc.contact'):
 		res = signed_req( acc_key, acc_meta['acc.url'],
@@ -552,207 +709,95 @@ def main(args=None):
 			kid=acc_meta['acc.url'], acme_url=acme_url )
 		if res.code not in [200, 201, 202]:
 			p_err('ERROR: ACME account contact info update request failed')
-			return print_req_err_info()
+			return p_err_for_req(res)
 		log.debug('Account contact info updated: {!r} -> {!r}', acc_meta['acc.contact'], acc_contact)
 		acc_meta['acc.contact'] = acc_contact
-		acc_meta.save_to_key_file(p_acc_key, file_mode=file_mode)
+		acc_meta.save()
 
-	acme_url_req = ft.partial( signed_req,
-		acc_key, acme_url=acme_url, kid=acc_meta['acc.url'] )
+	acc = AccSetup( acc_key, acc_meta,
+		ft.partial(signed_req, acc_key, acme_url=acme_url, kid=acc_meta['acc.url']) )
 
 
 	### Handle commands
 
 	if opts.call == 'account-info':
-		res = acme_url_req(acc_meta['acc.url'], dict(resource='reg'))
+		res = acc.req(acc.meta['acc.url'], dict(resource='reg'))
 		if res.code not in [200, 201, 202]:
 			p_err('ERROR: ACME account info request failed')
-			return print_req_err_info()
+			return p_err_for_req(res)
 		p(res.body.decode())
 
 	elif opts.call == 'account-deactivate':
-		res = acme_url_req(acc_meta['acc.url'], dict(resource='reg', status='deactivated'))
+		res = acc.req(acc.meta['acc.url'], dict(resource='reg', status='deactivated'))
 		if res.code != 200:
 			p_err('ERROR: ACME account deactivation request failed')
-			return print_req_err_info()
+			return p_err_for_req(res)
 		p(res.body.decode())
 
 
 	elif opts.call == 'domain-list':
-		for k in acc_meta.keys():
+		for k in acc.meta.keys():
 			if k.startswith('auth.domain:'): p(k[12:])
 
 	elif opts.call == 'domain-auth':
 		p_acme_dir = pathlib.Path(opts.acme_dir)
 		p_acme_dir.mkdir(parents=True, exist_ok=True)
 		token_mode = int(opts.challenge_file_mode, 8) & 0o777
-
 		for domain in opts.domain:
-			log.info('Authorizing access to domain: {!r}', domain)
-			payload_domain = dict(identifier=dict(type='dns', value=domain))
-			res = acme_url_req('new-authz', payload_domain)
-			if res.code == 403:
-				try: tos_error = json.loads(res.body)['type'] == 'urn:acme:error:unauthorized'
-				except: tos_error = False
-				if tos_error:
-					log.debug(
-						'Got http-403 (error:unauthorized),'
-						' trying to update account ToS agreement' )
-					payload = payload_reg.copy()
-					payload['resource'] = 'reg'
-					res = acme_url_req(acc_meta['acc.url'], payload)
-					if res.code not in [200, 201, 202]:
-						p_err('ERROR: ACME account tos agreement update failed')
-						return print_req_err_info()
-					log.debug('Account ToS agreement updated, retrying new-authz')
-					res = acme_url_req('new-authz', payload_domain)
-			if res.code != 201:
-				p_err('ERROR: ACME new-authz request failed for domain: {!r}', domain)
-				return print_req_err_info()
-
-			for ch in json.loads(res.body.decode())['challenges']:
-				if ch['type'] == 'http-01': break
-			else:
-				p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
-				return p_err('Challenge-offer JSON:{}', indent_lines(res.body.decode()))
-			token, token_url, auth_url = ch['token'], ch['uri'], res.headers['Location']
-			if re.search(r'[^\w\d_\-]', token):
-				return p_err( 'ERROR: Refusing to create path for'
-					' non-alphanum/b64 token value (security issue): {!r}', token )
-			key_authz = '{}.{}'.format(token, acc_key.jwk_thumbprint)
-			p_token = p_acme_dir / token
-			with safe_replacement(p_token, mode=token_mode) as dst: dst.write(key_authz)
-
-			# XXX: hook-script to run for delay/publish here
-
-			if not opts.dont_query_local_httpd:
-				url = 'http://{}/.well-known/acme-challenge/{}'.format(domain, token)
-				res = http_req(url)
-				if not (res.code == 200 and res.body.decode() == key_authz):
-					return p_err( 'ERROR: Token-file created in'
-						' -d/--acme-dir is not available at domain URL: {}', url )
-
-			res = acme_url_req( token_url,
-				dict(resource='challenge', type='http-01', keyAuthorization=key_authz) )
-			if res.code not in [200, 202]:
-				p_err('ERROR: http-01 challenge response was not accepted')
-				return print_req_err_info()
-
-			# XXX: hook-script to run for delay here
-
-			for n in range(1, 2**30): # XXX: timeout or other limit
-				log.debug('Polling domain access authorization [{:02d}]: {!r}', n, domain)
-				res = http_req(token_url)
-				if res.code in [200, 202]:
-					status = json.loads(res.body.decode())['status']
-					if status == 'invalid':
-						p_err('ERROR: http-01 challenge response was rejected by ACME CA')
-						return print_req_err_info()
-					if status == 'valid': break
-				elif res.code != 503:
-					p_err('ERROR: http-01 challenge-status-poll request failed')
-					return print_req_err_info()
-				retry_delay = res.headers.get('Retry-After')
-				if retry_delay:
-					if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
-					else:
-						retry_delay = email.utils.parsedate_to_datetime(retry_delay)
-						if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
-					retry_delay = max(0, retry_delay)
-				if not retry_delay: retry_delay = 2.0 # XXX: configurable, backoff
-				time.sleep(retry_delay)
-			p_token.unlink()
-
-			acc_meta['auth.domain:{}'.format(domain)] = auth_url
-			acc_meta.save_to_key_file(p_acc_key, file_mode=file_mode)
-
-			# XXX: hook-script to run after auth here?
-
+			if not opts.force and 'auth.domain:{}'.format(domain) in acc.meta:
+				log.debug('Skipping pre-authorized domain: {!r}', domain)
+				continue
+			log.debug('Authorizing access to domain: {!r}', domain)
+			err = cmd_domain_auth( acc, p_acme_dir, domain,
+				token_mode=token_mode, query_httpd=not opts.dont_query_local_httpd )
+			if err: return err
 			log.info('Authorized access to domain: {!r}', domain)
 
 	elif opts.call == 'domain-deauth':
 		for domain in opts.domain:
-			log.info('Deauthorizing access to domain: {!r}', domain)
-			res = acme_url_req(
-				acc_meta['auth.domain:{}'.format(domain)],
+			log.debug('Deauthorizing access to domain: {!r}', domain)
+			res = acc.req(
+				acc.meta['auth.domain:{}'.format(domain)],
 				dict(resource='authz', status='deactivated') )
 			if res.code != 200:
 				p_err('ERROR: deauth request failed for domain: {}', domain)
-				return print_req_err_info()
+				return p_err_for_req(res)
 			log.info('Deauthorized access to domain: {!r}', domain)
-			try:
-				del acc_meta['auth.domain:{}'.format(domain)]
+			try: acc.meta.pop('auth.domain:{}'.format(domain))
 			except KeyError: pass
-			else: acc_meta.save_to_key_file(p_acc_key, file_mode=file_mode)
+			else: acc.meta.save()
 
 
 	elif opts.call == 'cert-issue':
-		from cryptography import x509
-		from cryptography.x509.oid import NameOID
-
+		key_type_list = ( [opts.cert_key_type]
+			if isinstance(opts.cert_key_type, str) else opts.cert_key_type )
 		p_cert_base = pathlib.Path(opts.file_prefix)
 		p_cert_dir, p_cert_base = p_cert_base.parent, p_cert_base.name
 		cert_domain_list = [opts.domain] + (opts.altname or list())
-		# XXX: authorize domain(s)
-
-		csr = x509.CertificateSigningRequestBuilder()
-		csr_name = list()
+		cert_name_attrs = list()
 		for v in opts.cert_subject_info or list():
 			if '=' not in v:
 				parser.error( 'Invalid --cert-subject-info'
 					' spec (must be attr=value): {!r}'.format(v) )
-			k, v = v.split('=', 1)
-			csr_name.append(x509.NameAttribute(getattr(NameOID, k.upper()), v))
-		csr_name.append(x509.NameAttribute(NameOID.COMMON_NAME, opts.domain))
-		csr = csr.subject_name(x509.Name(csr_name))
-		csr = csr.add_extension(x509.SubjectAlternativeName(
-			list(map(x509.DNSName, cert_domain_list)) ), critical=False)
+			cert_name_attrs.append(v.split('=', 1))
 
-		certs = opts.cert_key_type
-		if isinstance(certs, str): certs = [certs]
-		certs = dict((k, X509CertInfo()) for k in certs)
-		for key_type, ci in certs.items():
-			log.debug('Generating {} key for certificate...', key_type)
-			ci.key = generate_crypto_key(key_type)
-			if not ci.key:
-				parser.error('Unknown/unsupported --cert-key-type value: {!r}'.format(key_type))
-			ci.csr = csr.sign(ci.key, hashes.SHA256(), crypto_backend)
+		if opts.acme_dir:
+			log.debug('Checking authorization for {} cert-domain(s)...', len(cert_domain_list))
+			p_acme_dir = pathlib.Path(opts.acme_dir)
+			p_acme_dir.mkdir(parents=True, exist_ok=True)
+			token_mode = int(opts.challenge_file_mode, 8) & 0o777
+			for domain in cert_domain_list:
+				if not opts.force and 'auth.domain:{}'.format(domain) in acc.meta: continue
+				log.debug('Authorizing access to cert-domain: {!r}', domain)
+				err = cmd_domain_auth( acc, p_acme_dir, domain,
+					token_mode=token_mode, query_httpd=not opts.dont_query_local_httpd )
+				if err: return err
+				log.debug('Authorized access to cert-domain: {!r}', domain)
 
-		for key_type, ci in certs.items():
-			csr_der = ci.csr.public_bytes(serialization.Encoding.DER)
-			res = acme_url_req('new-cert', dict(csr=b64_b2a_jose(csr_der)))
-			if res.code != 201:
-				p_err('ERROR: Failed to get signed cert from ACME CA', domain)
-				return print_req_err_info()
-			ci.cert_str = '-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n'\
-				.format('\n'.join(textwrap.wrap(base64.b64encode(res.body).decode(), 64)))
-			log.debug('Signed {} certificate', key_type)
-
-		files_used = set()
-		key_type_suffix, key_split = len(certs) > 1, opts.split_key_file
-		for key_type, ci in certs.items():
-			key_str = ci.key.private_bytes( serialization.Encoding.PEM,
-				serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption() ).decode()
-			p = p_cert_base
-			if key_type_suffix:
-				p = '{}.{}'.format(p.rstrip('.'), key_type)
-				if not key_split: p += '.pem'
-			p_cert, p_key = (p, None) if not key_split else\
-				('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key'])
-			with safe_replacement(p_cert_dir / p_cert, mode=file_mode) as dst:
-				dst.write(ci.cert_str)
-				if not p_key: dst.write(key_str)
-			if p_key:
-				with safe_replacement(p_cert_dir / p_key, mode=file_mode) as dst: dst.write(key_str)
-			files_used.update((p_cert, p_key))
-			log.info( 'Stored {} certificate/key: {}{}',
-				key_type, p_cert, ' / {}'.format(p_key) if p_key else '' )
-
-		if opts.remove_files_for_prefix:
-			for p in p_cert_dir.iterdir():
-				if p.is_dir() or p.name in files_used: continue
-				log.debug('Removing unused matching-prefix file: {}', p.name)
-				p.unlink()
+		return cmd_cert_issue( acc, p_cert_dir, p_cert_base,
+			key_type_list, cert_domain_list, cert_name_attrs,
+			file_mode=file_mode, split_key_file=opts.split_key_file,
+			remove_files_for_prefix=opts.remove_files_for_prefix )
 
 
 	elif not opts.call: parser.error('No command specified')
