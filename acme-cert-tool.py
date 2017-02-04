@@ -339,7 +339,8 @@ def main(args=None):
 
 
 	cmd = cmds.add_parser('domain-list',
-		help='List domains that key is authorized to manage certs for.')
+		help='List domains that key is authorized to manage certs for.',
+		description='One per line to stdout, from local metadata only.')
 
 	cmd = cmds.add_parser('domain-auth',
 		help='Authorize use of key (-k/--account-key-file) to manage certs for specified domain(s).')
@@ -634,6 +635,10 @@ def main(args=None):
 				p_err('ERROR: deauth request failed for domain: {}', domain)
 				return print_req_err_info()
 			log.info('Deauthorized access to domain: {!r}', domain)
+			try:
+				del acc_meta['auth.domain:{}'.format(domain)]
+			except KeyError: pass
+			else: acc_meta.save_to_key_file(p_acc_key, file_mode=file_mode)
 
 
 	elif opts.call == 'cert-issue':
