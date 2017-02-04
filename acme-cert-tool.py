@@ -130,7 +130,7 @@ class AccKey:
 		return r + s
 
 	@classmethod
-	def generate_to_file(cls, p_acc_key, key_type):
+	def generate_to_file(cls, p_acc_key, key_type, file_mode=None):
 		acc_key = acc_key_t = None
 		if key_type.startswith('rsa-'):
 			if key_type != 'rsa-4096': return
@@ -143,7 +143,8 @@ class AccKey:
 				serialization.Encoding.PEM,
 				serialization.PrivateFormat.PKCS8, serialization.NoEncryption() )
 			p_acc_key.parent.mkdir(parents=True, exist_ok=True)
-			with safe_replacement(p_acc_key, 'wb') as dst: dst.write(acc_key_pem)
+			with safe_replacement( p_acc_key,
+				'wb', mode=file_mode ) as dst: dst.write(acc_key_pem)
 			acc_key = cls(key_type, acc_key)
 		return acc_key
 
@@ -174,8 +175,8 @@ class AccMeta(dict):
 				self[k] = json.loads(v)
 		return self
 
-	def save_to_key_file(self, p_acc_key):
-		with safe_replacement(p_acc_key) as dst:
+	def save_to_key_file(self, p_acc_key, file_mode=None):
+		with safe_replacement(p_acc_key, mode=file_mode) as dst:
 			with p_acc_key.open() as src:
 				final_newline = True
 				for line in src:
@@ -273,7 +274,7 @@ def main(args=None):
 	# XXX: add usage examples maybe
 
 	group = parser.add_argument_group('ACME authentication')
-	group.add_argument('-k', '--account-key',
+	group.add_argument('-k', '--account-key-file',
 		metavar='path', required=True, help=textwrap.dedent('''\
 			Path to ACME domain-specific private key to use (pem with pkcs8/openssl/pkcs1).
 			All operations wrt current domain will be authenticated using this key.
@@ -282,22 +283,19 @@ def main(args=None):
 			If registered with ACME server, account URL will also be stored in the file alongside key.
 			If --gen-key (or -g/--gen-key-if-missing) is also specified,
 			 will be generated and path (incl. directories) will be created.'''))
-	group.add_argument('-d', '--acme-dir',
-		metavar='path', default='.', help=textwrap.dedent('''\
-			Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
-			Will be created, if does not exist already. Default: current directory.'''))
 	group.add_argument('-s', '--acme-service',
 		metavar='url-or-name', default='le-staging', help=textwrap.dedent('''\
 			ACME directory URL (or shortcut) of Cert Authority (CA) service to interact with.
 			Available shortcuts: le - Let\'s Encrypt, le-staging - Let\'s Encrypt staging server.
 			Default: %(default)s'''))
 
-	group = parser.add_argument_group('Domain-specific key (--account-key) generation',
+	group = parser.add_argument_group('Domain-specific key (-k/--account-key-file) generation',
 		description='Generated keys are always stored in pem/pkcs8 format with no encryption.')
 	group.add_argument('-g', '--gen-key-if-missing', action='store_true',
 		help='Generate ACME authentication key before operation, if it does not exist already.')
 	group.add_argument('--gen-key', action='store_true',
-		help='Generate new ACME authentication key regardless of whether --account-key path exists.')
+		help='Generate new ACME authentication'
+			' key regardless of whether -k/--account-key-file path exists.')
 	group.add_argument('-t', '--key-type',
 		metavar='type', choices=['rsa-4096', 'ec-384'], default='ec-384',
 		help='ACME authentication key type to generate.'
@@ -308,43 +306,92 @@ def main(args=None):
 		help='Register key with CA before verifying domains. Must be done at least once for key.'
 			' Should be safe to try doing that more than once,'
 				' CA will just return "409 Conflict" error (ignored by this script).'
-			' Performed automatically if --account-key file does not have account URL stored there.')
+			' Performed automatically if -k/--account-key-file does not have account URL stored there.')
 	group.add_argument('-e', '--contact-email', metavar='email',
 		help='Email address for any account-specific issues,'
 				' warnings and notifications to register along with the key.'
 			' If was not specified previously or differs from that, will be automatically updated.')
-	group.add_argument('-o', '--account-key-old', metavar='path',
+	group.add_argument('-o', '--account-key-file-old', metavar='path',
 		help='Issue a key-change command from an old key specified with this option.'
-			' Overrides -r/--register option - if old key is specified,'
-				' new one (specified as --account-key) will attached to same account as the old one.')
+			' Overrides -r/--register option - if old key is specified, new one'
+				' (specified as -k/--account-key-file) will attached to same account as the old one.')
 
 	group = parser.add_argument_group('Misc other options')
 	group.add_argument('-u', '--umask', metavar='octal', default='0077',
-		help='Umask to set before creating anything.'
-			' Default is 0077 to create 0600/0700 (user-only access) files/dirs.'
+		help='Umask to set for creating any directories, if missing/necessary.'
+			' Default is 0077 to create 0700 (user-only access) dirs.'
 			' Special value "-" (dash) will make script leave umask unchanged.')
+	group.add_argument('-m', '--mode', metavar='octal', default='0600',
+		help='Mode (octal) to use for storing cert and key files.'
+			' Default is 0600 to have user-only access to these files.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 
 	cmds = parser.add_subparsers(title='Commands', dest='call')
 
+
 	cmd = cmds.add_parser('account-info',
 		help='Request and print info for ACME account associated with the specified key.')
+
 	cmd = cmds.add_parser('account-deactivate',
 		help='Deactivate (block/remove) ACME account'
 			' associated with the key. It cannot be reactivated again.')
 
-	cmd = cmds.add_parser('verify-domain',
-		help='Verify (and optionally register) --account-key for specified domain(s).')
+
+	cmd = cmds.add_parser('domain-list',
+		help='List domains that key is authorized to manage certs for.')
+
+	cmd = cmds.add_parser('domain-auth',
+		help='Authorize use of key (-k/--account-key-file) to manage certs for specified domain(s).')
+	cmd.add_argument('acme_dir', help=textwrap.dedent('''\
+			Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
+			Will be created, if does not exist already.'''))
 	cmd.add_argument('domain', nargs='+',
-		help='Domain(s) to authenticate with specified key (--account-key).')
+		help='Domain(s) to authorize for use with specified key (-k/--account-key-file).')
 	cmd.add_argument('--dont-query-local-httpd', action='store_true',
 		help='Skip querying challege response at a local'
 				' "well-known" URLs created by this script before submitting them to ACME CA.'
 			' Default is to query e.g. "example.com/.well-known/acme-challenge/some-token" URL'
-				' immediately after script creates "some-token" file in -d/--acme-dir directory,'
+				' immediately after script creates "some-token" file in acme_dir directory,'
 				' to make sure it would be accessible to ACME CA servers as well.'
 			' Can be skipped in configurations where local host should not be able to query that URL.')
+	group.add_argument('-c', '--challenge-file-mode', metavar='octal', default='0644',
+		help='Separate access mode (octal) value to use for ACME challenge file in acme_dir directory.'
+			' Default is 0644 to allow read access for any uid (e.g. httpd) to these files.')
+
+	cmd = cmds.add_parser('domain-deauth', help='Remove authorization for specified domain(s).')
+	cmd.add_argument('domain', nargs='+', help='Domain(s) to deauthenticate.')
+
+
+	cmd = cmds.add_parser('cert-issue',
+		help='Generate new X.509 v3 (TLS) certificate/key pair'
+			' for specified domain(s), with cert signed by ACME CA.')
+	cmd.add_argument('file_prefix',
+		help='Resulting PEM filename or filename prefix'
+			' (if >1 files/certs are requested, see options below).')
+	cmd.add_argument('domain',
+		help='Main domain to issue certificate for.'
+			' Will be used in a certificate Common Name field (CN), and SubjectAltName.')
+	cmd.add_argument('altname', nargs='*',
+		help='Extra domain(s) that certificate should be valid for.'
+			' Will be used in a certificate SubjectAltName extension field.')
+	cmd.add_argument('-c', '--cert-key-type',
+		metavar='type', choices=['rsa-4096', 'ec-384'], default='ec-384',
+		help='Cert key to generate.'
+			' Possible values: rsa-4096, ec-384 (secp384r1). Default: %(default)s')
+	cmd.add_argument('-2', '--two-certs', action='store_true',
+		help='Generate rsa cert in addition to ec, so that'
+				' both can be used in case client can\' work with ecc.'
+			' Filename suffixes will correspond to cert type, with an extra dot appended'
+				' if prefix does not end with one, e.g. "mycert.ec-384" and "mycert.rsa-4096".')
+	cmd.add_argument('-s', '--split-key-file', action='store_true',
+		help='Store private key in a separate .key file, while certificate to a .crt file, both'
+				' with specified filename prefix plus a dot separator, e.g. "mycert.crt" + "mycert.key".'
+			' Default is to store both cert and key in the same (specified) file.')
+	cmd.add_argument('-r', '--remove-files-for-prefix', action='store_true',
+		help='After storing new cert/key files, remove all files with specified prefix'
+			' that were there previously. Only done after successful operation,'
+			' idea is to cleanup any old files to avoid confusion.')
 
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -356,67 +403,72 @@ def main(args=None):
 	log = get_logger('main')
 
 
-	if opts.umask != '-': os.umask(int(opts.umask, 8))
-
-	p_acme_dir = pathlib.Path(opts.acme_dir)
-	p_acme_dir.mkdir(parents=True, exist_ok=True)
+	if opts.umask != '-': os.umask(int(opts.umask, 8) & 0o777)
+	file_mode = int(opts.mode, 8) & 0o777
 
 	acme_url = opts.acme_service
 	if ':' not in acme_url:
 		try: acme_url = acme_ca_shortcuts[acme_url.replace('-', '_')]
 		except KeyError: parser.error('Unkown --acme-service shortcut: {!r}'.format(acme_url))
 
-	p_acc_key = pathlib.Path(opts.account_key)
+	p_acc_key = pathlib.Path(opts.account_key_file)
 	if opts.gen_key or (opts.gen_key_if_missing and not p_acc_key.exists()):
-		acc_key = AccKey.generate_to_file(p_acc_key, opts.key_type)
+		acc_key = AccKey.generate_to_file(p_acc_key, opts.key_type, file_mode=file_mode)
 		if not acc_key:
 			parser.error('Unknown/unsupported --key-type type value: {!r}'.format(opts.key_type))
 	elif p_acc_key.exists():
 		acc_key = AccKey.load_from_file(p_acc_key)
 		if not acc_key: parser.error('Unknown/unsupported key type: {}'.format(p_acc_key))
-	else: parser.error('Specified --account-key path does not exists: {!r}'.format(p_acc_key))
+	else: parser.error('Specified --account-key-file path does not exists: {!r}'.format(p_acc_key))
 	acc_meta = AccMeta.load_from_key_file(p_acc_key)
 	log.debug( 'Using {} domain key: {} (acme acc url: {})',
 		acc_key.t, acc_key.pk_hash, acc_meta.get('acc.url') )
 
 	indent_lines = lambda text,indent='  ',prefix='\n': ( (prefix if text else '') +
 		''.join('{}{}'.format(indent, line) for line in text.splitlines(keepends=True)) )
-	print_req_err_info = lambda: p_err( 'Server response: {} {}{}',
-		res.code or '-', res.reason or '-', indent_lines(res.body.decode()) )
+	print_req_err_info = lambda: p_err(
+		'Server response: {} {}\nHeaders: {}Body: {}',
+		res.code or '-', res.reason or '-',
+		indent_lines(''.join( '{}: {}\n'.format(k, v)
+			for k, v in (res.headers.items() if res.headers else list()) )),
+		indent_lines(res.body.decode()) )
 
 
 	### Handle account status
 
-	acc_key_old = opts.account_key_old
+	acc_key_old = opts.account_key_file_old
 	acc_register = opts.register or acc_key_old or not acc_meta.get('acc.url')
 	acc_contact = opts.contact_email and 'mailto:{}'.format(opts.contact_email)
 
+	# 2017-02-03: "agreement" is for letsencrypt/boulder, "terms-of-service-agreed" is ignored
+	payload_reg = {
+		'terms-of-service-agreed': True,
+		'agreement': 'https://letsencrypt.org/documents/LE-SA-v1.1.1-August-1-2016.pdf' }
 	if acc_register:
-		payload_reg = {'terms-of-service-agreed': True}
-
 		if not os.access(p_acc_key, os.W_OK):
 			return p_err( 'ERROR: Account registration required,'
 				' but key file is not writable (to store new-reg url there): {}', p_acc_key )
 		if acc_meta.get('acc.url'):
-			log.warning( 'Specified --account-key already marked as'
+			log.warning( 'Specified --account-key-file already marked as'
 				' registered (url: {}), proceeding regardless.', acc_meta['acc.url'] )
 		if acc_key_old:
 			if opts.register:
 				log.debug( 'Both -r/--register and'
-					' -o/--account-key-old are specified, acting according to latter option.' )
+					' -o/--account-key-file-old are specified, acting according to latter option.' )
 			p_acc_key_old = pathlib.Path(acc_key_old)
 			acc_key_old = AccKey.load_from_file(p_acc_key_old)
 			if not acc_key_old:
 				parser.error('Unknown/unsupported key type'
-					' specified with -o/--account-key-old: {}'.format(p_acc_key))
+					' specified with -o/--account-key-file-old: {}'.format(p_acc_key))
 			acc_meta_old = AccMeta.load_from_key_file(p_acc_key_old)
 			acc_url_old = acc_meta_old.get('acc.url')
 			if not acc_url_old:
-				log.debug( 'Old key file (-o/--account-key-old) does'
+				log.debug( 'Old key file (-o/--account-key-file-old) does'
 					' not have registration URL, will be fetched via new-reg request' )
 				res = signed_req(acc_key_old, 'new-reg', payload_reg, acme_url=acme_url)
 				if res.code not in [201, 409]:
-					p_err('ERROR: ACME new-reg request for old key (-o/--account-key-old) failed')
+					p_err('ERROR: ACME new-reg'
+						' request for old key (-o/--account-key-file-old) failed')
 					return print_req_err_info()
 				acc_url_old = res.headers['Location']
 
@@ -441,23 +493,23 @@ def main(args=None):
 			#  but 6.3.2 explicitly mentions jwks, so guess it should also be exception here.
 			res = signed_req(acc_key_old, url, payload, nonce=nonce, resource=resource)
 			if res.code not in [200, 201, 202]:
-				p_err('ERROR: ACME key-change request failed')
+				p_err('ERROR: ACME account key-change request failed')
 				return print_req_err_info()
 			log.debug('Account key-change success: {} -> {}', acc_key_old.pk_hash, acc_key.pk_hash)
 			acc_meta['acc.url'] = acc_url_old
 			acc_meta['acc.contact'] = acc_meta_old.get('acc.contact')
-		acc_meta.save_to_key_file(p_acc_key)
+		acc_meta.save_to_key_file(p_acc_key, file_mode=file_mode)
 
 	if acc_contact and acc_contact != acc_meta.get('acc.contact'):
 		res = signed_req( acc_key, acc_meta['acc.url'],
 			dict(resource='reg', contact=[acc_contact]),
 			kid=acc_meta['acc.url'], acme_url=acme_url )
 		if res.code not in [200, 201, 202]:
-			p_err('ERROR: ACME contact info update request failed')
+			p_err('ERROR: ACME account contact info update request failed')
 			return print_req_err_info()
 		log.debug('Account contact info updated: {!r} -> {!r}', acc_meta['acc.contact'], acc_contact)
 		acc_meta['acc.contact'] = acc_contact
-		acc_meta.save_to_key_file(p_acc_key)
+		acc_meta.save_to_key_file(p_acc_key, file_mode=file_mode)
 
 	acme_url_req = ft.partial( signed_req,
 		acc_key, acme_url=acme_url, kid=acc_meta['acc.url'] )
@@ -480,10 +532,34 @@ def main(args=None):
 		p(res.body.decode())
 
 
-	elif opts.call == 'verify-domain':
+	elif opts.call == 'domain-list':
+		for k in acc_meta.keys():
+			if k.startswith('auth.domain:'): p(k[12:])
+
+	elif opts.call == 'domain-auth':
+		p_acme_dir = pathlib.Path(opts.acme_dir)
+		p_acme_dir.mkdir(parents=True, exist_ok=True)
+		token_mode = int(opts.challenge_file_mode, 8) & 0o777
+
 		for domain in opts.domain:
 			log.info('Authorizing access to domain: {!r}', domain)
-			res = acme_url_req('new-authz', dict(identifier=dict(type='dns', value=domain)))
+			payload_domain = dict(identifier=dict(type='dns', value=domain))
+			res = acme_url_req('new-authz', payload_domain)
+			if res.code == 403:
+				try: tos_error = json.loads(res.body)['type'] == 'urn:acme:error:unauthorized'
+				except: tos_error = False
+				if tos_error:
+					log.debug(
+						'Got http-403 (error:unauthorized),'
+						' trying to update account ToS agreement' )
+					payload = payload_reg.copy()
+					payload['resource'] = 'reg'
+					res = acme_url_req(acc_meta['acc.url'], payload)
+					if res.code not in [200, 201, 202]:
+						p_err('ERROR: ACME account tos agreement update failed')
+						return print_req_err_info()
+					log.debug('Account ToS agreement updated, retrying new-authz')
+					res = acme_url_req('new-authz', payload_domain)
 			if res.code != 201:
 				p_err('ERROR: ACME new-authz request failed for domain: {!r}', domain)
 				return print_req_err_info()
@@ -493,13 +569,13 @@ def main(args=None):
 			else:
 				p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
 				return p_err('Challenge-offer JSON:{}', indent_lines(res.body.decode()))
-			token = ch['token']
+			token, token_url, auth_url = ch['token'], ch['uri'], res.headers['Location']
 			if re.search(r'[^\w\d_\-]', token):
 				return p_err( 'ERROR: Refusing to create path for'
 					' non-alphanum/b64 token value (security issue): {!r}', token )
 			key_authz = '{}.{}'.format(token, acc_key.jwk_thumbprint)
 			p_token = p_acme_dir / token
-			with safe_replacement(p_token) as dst: dst.write(key_authz)
+			with safe_replacement(p_token, mode=token_mode) as dst: dst.write(key_authz)
 
 			# XXX: hook-script to run for delay/publish here
 
@@ -510,7 +586,7 @@ def main(args=None):
 					return p_err( 'ERROR: Token-file created in'
 						' -d/--acme-dir is not available at domain URL: {}', url )
 
-			res = acme_url_req( ch['uri'],
+			res = acme_url_req( token_url,
 				dict(resource='challenge', type='http-01', keyAuthorization=key_authz) )
 			if res.code not in [200, 202]:
 				p_err('ERROR: http-01 challenge response was not accepted')
@@ -518,8 +594,9 @@ def main(args=None):
 
 			# XXX: hook-script to run for delay here
 
-			while True: # XXX: timeout or other limit
-				res = http_req(ch['uri'])
+			for n in range(1, 2**30): # XXX: timeout or other limit
+				log.debug('Polling domain access authorization [{:02d}]: {!r}', n, domain)
+				res = http_req(token_url)
 				if res.code in [200, 202]:
 					status = json.loads(res.body.decode())['status']
 					if status == 'invalid':
@@ -540,9 +617,29 @@ def main(args=None):
 				time.sleep(retry_delay)
 			p_token.unlink()
 
+			acc_meta['auth.domain:{}'.format(domain)] = auth_url
+			acc_meta.save_to_key_file(p_acc_key, file_mode=file_mode)
+
 			# XXX: hook-script to run after auth here?
 
 			log.info('Authorized access to domain: {!r}', domain)
+
+	elif opts.call == 'domain-deauth':
+		for domain in opts.domain:
+			log.info('Deauthorizing access to domain: {!r}', domain)
+			res = acme_url_req(
+				acc_meta['auth.domain:{}'.format(domain)],
+				dict(resource='authz', status='deactivated') )
+			if res.code != 200:
+				p_err('ERROR: deauth request failed for domain: {}', domain)
+				return print_req_err_info()
+			log.info('Deauthorized access to domain: {!r}', domain)
+
+
+	elif opts.call == 'cert-issue':
+		# XXX: file_prefix, domain, altname, cert_key_type,
+		#  two_certs, split_key_file, remove_files_for_prefix
+		pass
 
 
 	elif not opts.call: parser.error('No command specified')
