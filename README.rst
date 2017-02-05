@@ -26,6 +26,16 @@ Main features
 
 - Does not do anything with httpd or any other daemons and their configuration.
 
+Can generate/use account keys (ec-384/rsa-2048/rsa-4096, pem pkcs8 or openssl/pkcs1),
+register/query/deactivate accounts, authorize/deauthorize domains
+(via http-01 challenge), generate configurable X.509 CSRs
+(ec-384/rsa-2048/rsa-4096 keys, pem openssl/pkcs1 for certs and keys),
+sign these through ACME CA.
+
+Hook scripts can be used at multiple points to integrate script into whatever
+setup (e.g. sync challenge files, reload httpd, introduce delays, etc),
+see ``./acme-cert-tool.py --hook-list`` for more info on these.
+
 
 Usage example
 -------------

@@ -276,8 +276,61 @@ def signed_req( acc_key, url, payload, kid=None,
 	return res
 
 
+class AccHooks(dict):
+	points = {
+		'domain-auth.start-all':
+			'Before starting authorization process for domain(s), once per script run.\n'
+			'args: all domains to be authorized, in the same order.',
+		'domain-auth.start':
+			'Before authorization of each individual domain.'
+			'args: domain to be authorized.',
+		'domain-auth.publish-challenge':
+			'After http-01 challenge-file has been stored in acme-dir and before\n'
+				' checking local httpd for it (if not disabled) or notifying CA about it.\n'
+			'args: domain to be authorized, challenge-file path.',
+		'domain-auth.poll-attempt':
+			'After notifying ACME CA about http-01 challenge completion\n'
+				' and before each attempt to check domain authorization results.\n'
+			'args: authorized domain, challenge-file path, number of poll-attempt (1, 2, 3, ...).',
+		'domain-auth.poll-delay':
+			'After each check for domain authorization result, if it is not available yet.\n'
+			'args: authorized domain, challenge-file path, number of poll-attempt (1, 2, 3, ...),\n'
+				'      delay as specified by ACME server in Retry-After header or "0" if none.',
+		'domain-auth.done':
+			'After authorization of each individual domain.\n'
+			'args: domain that was authorized.',
+		'domain-auth.done-all':
+			'After authorization process for domain(s), once per script run.\n'
+			'args: all domains that were authorized, in the same order.',
+		'cert.csr-check':
+			'Before submitting any of Cert Signing Requests (CSR) to ACME CA for signing.\n'
+			'args: key type (e.g. ec-384, rsa-2048, etc), cert domain(s).\n'
+			'stdin: DER-encoded CSR, exactly same as will be submitted to CA.',
+		'cert.issued':
+			'After signing (all) CSR(s) (one per key type, if >1)\n'
+				' with the server, but before storing any of certs/keys on fs.\n'
+			'args: cert domain(s).',
+		'cert.stored':
+			'After storing all cert/key files on filesystem, but before any cleanup (if enabled).\n'
+			'args: paths of all cert/key files.',
+	}
+	__slots__ = 'timeout'.split()
+	def __init__(self, *args, **kws):
+		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
+		if self.timeout <= 0: self.timeout = None
+
+	def run(self, hook, *hook_args, **run_kws):
+		import subprocess
+		hook_script = self.get(hook)
+		if not hook_script: return
+		kws = dict(check=True, timeout=self.timeout)
+		kws.update(run_kws)
+		hook_args = list(map(str, hook_args))
+		log.debug('Running {} hook: {} (args: {})', hook, hook_script, hook_args)
+		return subprocess.run([hook_script] + hook_args, **kws)
+
 class AccSetup:
-	__slots__ = 'key meta req'.split()
+	__slots__ = 'key meta hooks req'.split()
 	def __init__(self, *args, **kws):
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
@@ -287,8 +340,38 @@ class X509CertInfo:
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
 
-def cmd_domain_auth( acc,
-		p_acme_dir, domain, token_mode=0o600, query_httpd=True ):
+def domain_auth_filter(acc, domains):
+	for domain in domains:
+		if 'auth.domain:{}'.format(domain) in acc.meta:
+			log.debug('Skipping pre-authorized domain: {!r}', domain)
+			continue
+		yield domain
+
+def cmd_domain_auth_batch( acc, domains,
+		opt_acme_dir, opt_challenge_file_mode, opt_poll_params,
+		auth_log=None, force=False, query_httpd=True ):
+	p_acme_dir = pathlib.Path(opt_acme_dir)
+	p_acme_dir.mkdir(parents=True, exist_ok=True)
+	token_mode = int(opt_challenge_file_mode, 8) & 0o777
+	if not force: domains = list(domain_auth_filter(acc, domains))
+	if opt_poll_params:
+		delay, attempts = opt_poll_params.split(':', 1)
+		poll_opts = dict(poll_interval=float(delay), poll_attempts=int(attempts))
+	else: poll_opts = dict()
+	acc.hooks.run('domain-auth.start-all', *domains)
+	for domain in domains:
+		log.debug('Authorizing access to domain: {!r}', domain)
+		acc.hooks.run('domain-auth.start', domain)
+		err = cmd_domain_auth( acc, p_acme_dir, domain,
+			token_mode=token_mode, query_httpd=query_httpd, **poll_opts )
+		if err: return err
+		acc.hooks.run('domain-auth.done', domain)
+		(auth_log or log.debug)('Authorized access to domain: {!r}', domain)
+	acc.hooks.run('domain-auth.done-all', domains)
+
+def cmd_domain_auth( acc, p_acme_dir, domain,
+		token_mode=0o600, query_httpd=True,
+		poll_interval=lambda n: min(60, (2**n - 1) / 5), poll_attempts=15 ):
 	payload_domain = dict(identifier=dict(type='dns', value=domain))
 	res = acc.req('new-authz', payload_domain)
 	if res.code == 403:
@@ -323,8 +406,7 @@ def cmd_domain_auth( acc,
 	p_token = p_acme_dir / token
 	with safe_replacement(p_token, mode=token_mode) as dst: dst.write(key_authz)
 
-	# XXX: hook-script to run for delay/publish here
-
+	acc.hooks.run('domain-auth.publish-challenge', domain, p_token)
 	if query_httpd:
 		url = 'http://{}/.well-known/acme-challenge/{}'.format(domain, token)
 		res = http_req(url)
@@ -338,10 +420,9 @@ def cmd_domain_auth( acc,
 		p_err('ERROR: http-01 challenge response was not accepted')
 		return p_err_for_req(res)
 
-	# XXX: hook-script to run for delay here
-
-	for n in range(1, 2**30): # XXX: timeout or other limit
-		log.debug('Polling domain access authorization [{:02d}]: {!r}', n, domain)
+	for n in range(1, poll_attempts+1):
+		acc.hooks.run('domain-auth.poll-attempt', domain, p_token, n)
+		log.debug('Polling domain-auth [{:02d}]: {!r}', n, domain)
 		res = http_req(token_url)
 		if res.code in [200, 202]:
 			status = json.loads(res.body.decode())['status']
@@ -352,6 +433,7 @@ def cmd_domain_auth( acc,
 		elif res.code != 503:
 			p_err('ERROR: http-01 challenge-status-poll request failed')
 			return p_err_for_req(res)
+
 		retry_delay = res.headers.get('Retry-After')
 		if retry_delay:
 			if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
@@ -359,14 +441,19 @@ def cmd_domain_auth( acc,
 				retry_delay = email.utils.parsedate_to_datetime(retry_delay)
 				if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
 			retry_delay = max(0, retry_delay)
-		if not retry_delay: retry_delay = 2.0 # XXX: configurable, backoff
-		time.sleep(retry_delay)
+		retry_delay_acme = retry_delay or '0'
+		if not retry_delay:
+			retry_delay = poll_interval(n) if callable(poll_interval) else poll_interval
+		delay_until = time.monotonic() + max(0, retry_delay)
+		acc.hooks.run('domain-auth.poll-delay', domain, p_token, n, retry_delay_acme)
+		retry_delay = max(0, delay_until - time.monotonic())
+		if retry_delay > 0:
+			log.debug('Polling domain-auth delay [{:02d}]: {:.2f}', n, retry_delay)
+			time.sleep(retry_delay)
 	p_token.unlink()
 
 	acc.meta['auth.domain:{}'.format(domain)] = auth_url
 	acc.meta.save()
-
-	# XXX: hook-script to run after auth here?
 
 
 def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
@@ -393,15 +480,21 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 			parser.error('Unknown/unsupported --cert-key-type value: {!r}'.format(key_type))
 		ci.csr = csr.sign(ci.key, hashes.SHA256(), crypto_backend)
 
+	csr_ders = dict()
 	for key_type, ci in certs.items():
 		csr_der = ci.csr.public_bytes(serialization.Encoding.DER)
-		res = acc.req('new-cert', dict(csr=b64_b2a_jose(csr_der)))
+		acc.hooks.run('cert.csr-check', key_type, *cert_domain_list, stdin=csr_der)
+		csr_ders[key_type] = csr_der
+
+	for key_type, ci in certs.items():
+		res = acc.req('new-cert', dict(csr=b64_b2a_jose(csr_ders[key_type])))
 		if res.code != 201:
 			p_err('ERROR: Failed to get signed cert from ACME CA', domain)
 			return p_err_for_req(res)
 		ci.cert_str = '-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n'\
 			.format('\n'.join(textwrap.wrap(base64.b64encode(res.body).decode(), 64)))
 		log.debug('Signed {} certificate', key_type)
+	acc.hooks.run('cert.issued', *cert_domain_list)
 
 	files_used, key_type_suffix = set(), len(certs) > 1
 	for key_type, ci in certs.items():
@@ -421,6 +514,7 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 		files_used.update((p_cert, p_key))
 		log.info( 'Stored {} certificate/key: {}{}',
 			key_type, p_cert, ' / {}'.format(p_key) if p_key else '' )
+	acc.hooks.run('cert.stored', *filter(None, files_used))
 
 	if remove_files_for_prefix:
 		for p in p_cert_dir.iterdir():
@@ -443,7 +537,7 @@ def main(args=None):
 	parser = argparse.ArgumentParser(
 		formatter_class=SmartHelpFormatter,
 		description='Lets Encrypt CA interaction tool to make'
-			' it authorize domain and sign/renew/revoke TLS certs.',
+			' it authorize domain (via http-01 challenge) and sign/renew/revoke TLS certs.',
 		epilog=textwrap.dedent('''
 			Usage examples:
 
@@ -473,8 +567,7 @@ def main(args=None):
 		'''))
 
 	group = parser.add_argument_group('ACME authentication')
-	group.add_argument('-k', '--account-key-file',
-		metavar='path', required=True, help=textwrap.dedent('''\
+	group.add_argument('-k', '--account-key-file', metavar='path', help=textwrap.dedent('''\
 			Path to ACME domain-specific private key to use (pem with pkcs8/openssl/pkcs1).
 			All operations wrt current domain will be authenticated using this key.
 			It has nothing to do with actual issued TLS certs and cannot be reused in them.
@@ -515,6 +608,22 @@ def main(args=None):
 			' Overrides -r/--register option - if old key is specified, new one'
 				' (specified as -k/--account-key-file) will attached to same account as the old one.')
 
+	group = parser.add_argument_group('Hook options')
+	group.add_argument('-x', '--hook', action='append', metavar='hook:path',
+		help='Hook-script to run at the specified point.'
+			' Specified path must be executable (chmod +x ...), will be run synchronously,'
+				' and must exit with 0 for tool to continue operation, and non-zero to abort immediately.'
+			' Hooks are run with same uid/gid and env as the main script, can use PATH-lookup.'
+			' See --hook-list output to get full list of'
+				' all supported hook-points and arguments passed to them.'
+			' Example spec: -x domain-auth.publish-challenge:/etc/nginx/sync-frontends.sh')
+	group.add_argument('--hook-timeout', metavar='seconds', type=float, default=120,
+		help='Timeout for waiting for hook-script to finish running,'
+				' before aborting the operation (treated as hook error).'
+			' Zero or negative value will disable timeout. Default: %(default)s')
+	group.add_argument('--hook-list', action='store_true',
+		help='Print the list of all supported hooks with descriptions/parameters and exit.')
+
 	group = parser.add_argument_group('Misc other options')
 	group.add_argument('-u', '--umask', metavar='octal', default='0077',
 		help='Umask to set for creating any directories, if missing/necessary.'
@@ -549,8 +658,12 @@ def main(args=None):
 		Will be created, if does not exist already.'''))
 	cmd.add_argument('domain', nargs='+',
 		help='Domain(s) to authorize for use with specified key (-k/--account-key-file).')
-	group.add_argument('-f', '--force', action='store_true',
+	group.add_argument('-f', '--auth-force', action='store_true',
 		help='Dont skip domains which are already recorded as authorized in local acc metadata.')
+	group.add_argument('--auth-poll-params', metavar='delay:attempts',
+		help='Specific auth-result polling interval value (if ACME server'
+				' does not provide one, in seconds) and number of attempts to use.'
+			' Default is to use exponential backoff, with 60s limit and 15 attempts max over ~10min.')
 	cmd.add_argument('--dont-query-local-httpd', action='store_true',
 		help='Skip querying challege response at a local'
 				' "well-known" URLs created by this script before submitting them to ACME CA.'
@@ -603,15 +716,15 @@ def main(args=None):
 	group.add_argument('altname', nargs='*',
 		help='Extra domain(s) that certificate should be valid for.'
 			' Will be used in a certificate SubjectAltName extension field.')
-	group.add_argument('-i', '--cert-subject-info',
-		action='append', metavar='attr=value', help=textwrap.dedent('''\
-			Additional subject info to include in the X.509 Name, in attr=value format.
+	group.add_argument('-i', '--cert-name-attrs',
+		action='append', metavar='attr:value', help=textwrap.dedent('''\
+			Additional attributes to include in the X.509 Name, in attr=value format.
 			This option can be used multiple times, attributes
 			 will be added in the same order with CN from "domain" arg at the end.
 			See list of recognized "attr" names (case-insensitive) in cryptography.io docs:
 			 https://cryptography.io/en/latest/x509/reference/#object-identifiers
 			For example, to have country and email attrs in the cert, use:
-			 -i country_name=US -i  email_address=user@myhost.com'''))
+			 -i country_name:US -i  email_address:user@myhost.com'''))
 
 	group = cmd.add_argument_group('Certificate domain authorization options',
 		description='Options for automatic authorization of'
@@ -622,8 +735,12 @@ def main(args=None):
 		 authorization for cert domain(s) to be performed.
 		If not specified, domains are assumed to be pre-authorized.
 		Will be created, if does not exist already.'''))
-	group.add_argument('-f', '--force', action='store_true',
+	group.add_argument('-f', '--auth-force', action='store_true',
 		help='Dont skip domains which are already recorded as authorized in local acc metadata.')
+	group.add_argument('--auth-poll-params', metavar='delay:attempts',
+		help='Specific auth-result polling interval value (if ACME server'
+				' does not provide one, in seconds) and number of attempts to use.'
+			' Default is to use exponential backoff, with 60s limit and 15 attempts max over ~10min.')
 	group.add_argument('--dont-query-local-httpd', action='store_true',
 		help='Skip querying challege response at a local'
 				' "well-known" URLs created by this script before submitting them to ACME CA.'
@@ -640,6 +757,26 @@ def main(args=None):
 		level=logging.DEBUG if opts.debug else logging.WARNING )
 	log = get_logger('main')
 
+	acc_hooks = AccHooks(opts.hook_timeout)
+	if opts.hook_list:
+		p('Available hook points:\n')
+		for hp, desc in acc_hooks.points.items():
+			p('  {}:', hp)
+			indent = ' '*4
+			desc = textwrap.fill(desc, width=100, initial_indent=indent, subsequent_indent=indent)\
+				if '\n' not in desc else ''.join(indent + line for line in desc.splitlines(keepends=True))
+			p(desc + '\n')
+		p('Hooks are run synchronously, waiting for subprocess to exit before continuing.')
+		p('All hooks must exit with status 0 to continue operation.')
+		p('Some hooks get passed arguments, as mentioned in hook descriptions.')
+		p('Setting --hook-timeout (defaults to 120s) can be used to abort when hook-scripts hang.')
+		return
+	for v in opts.hook or list():
+		if ':' not in v: parser.error('Invalid --hook spec (must be hook:path): {!r}'.format(v))
+		hp, path = v.split(':', 1)
+		if hp not in acc_hooks.points:
+			parser.error('Invaluid hook name: {!r} (see --hook-list)'.format(hp))
+		acc_hooks[hp] = path
 
 	if opts.umask != '-': os.umask(int(opts.umask, 8) & 0o777)
 	file_mode = int(opts.mode, 8) & 0o777
@@ -649,6 +786,8 @@ def main(args=None):
 		try: acme_url = acme_ca_shortcuts[acme_url.replace('-', '_')]
 		except KeyError: parser.error('Unkown --acme-service shortcut: {!r}'.format(acme_url))
 
+	if not opts.account_key_file:
+		parser.error('Path for -k/--account-key-file must be specified.')
 	p_acc_key = pathlib.Path(opts.account_key_file)
 	if opts.gen_key or (opts.gen_key_if_missing and not p_acc_key.exists()):
 		acc_key = AccKey.generate_to_file(p_acc_key, opts.key_type, file_mode=file_mode)
@@ -740,7 +879,7 @@ def main(args=None):
 		acc_meta['acc.contact'] = acc_contact
 		acc_meta.save()
 
-	acc = AccSetup( acc_key, acc_meta,
+	acc = AccSetup( acc_key, acc_meta, acc_hooks,
 		ft.partial(signed_req, acc_key, acme_url=acme_url, kid=acc_meta['acc.url']) )
 
 
@@ -766,18 +905,9 @@ def main(args=None):
 			if k.startswith('auth.domain:'): p(k[12:])
 
 	elif opts.call == 'domain-auth':
-		p_acme_dir = pathlib.Path(opts.acme_dir)
-		p_acme_dir.mkdir(parents=True, exist_ok=True)
-		token_mode = int(opts.challenge_file_mode, 8) & 0o777
-		for domain in opts.domain:
-			if not opts.force and 'auth.domain:{}'.format(domain) in acc.meta:
-				log.debug('Skipping pre-authorized domain: {!r}', domain)
-				continue
-			log.debug('Authorizing access to domain: {!r}', domain)
-			err = cmd_domain_auth( acc, p_acme_dir, domain,
-				token_mode=token_mode, query_httpd=not opts.dont_query_local_httpd )
-			if err: return err
-			log.info('Authorized access to domain: {!r}', domain)
+		return cmd_domain_auth_batch(
+			acc, opts.domain, opts.acme_dir, opts.challenge_file_mode, opts.auth_poll_params,
+			auth_log=log.info, force=opts.auth_force, query_httpd=not opts.dont_query_local_httpd )
 
 	elif opts.call == 'domain-deauth':
 		for domain in opts.domain:
@@ -801,24 +931,17 @@ def main(args=None):
 		p_cert_dir, p_cert_base = p_cert_base.parent, p_cert_base.name
 		cert_domain_list = [opts.domain] + (opts.altname or list())
 		cert_name_attrs = list()
-		for v in opts.cert_subject_info or list():
-			if '=' not in v:
+		for v in opts.cert_name_attrs or list():
+			if ':' not in v:
 				parser.error( 'Invalid --cert-subject-info'
-					' spec (must be attr=value): {!r}'.format(v) )
-			cert_name_attrs.append(v.split('=', 1))
+					' spec (must be attr:value): {!r}'.format(v) )
+			cert_name_attrs.append(map(str.strip, v.split(':', 1)))
 
 		if opts.acme_dir:
 			log.debug('Checking authorization for {} cert-domain(s)...', len(cert_domain_list))
-			p_acme_dir = pathlib.Path(opts.acme_dir)
-			p_acme_dir.mkdir(parents=True, exist_ok=True)
-			token_mode = int(opts.challenge_file_mode, 8) & 0o777
-			for domain in cert_domain_list:
-				if not opts.force and 'auth.domain:{}'.format(domain) in acc.meta: continue
-				log.debug('Authorizing access to cert-domain: {!r}', domain)
-				err = cmd_domain_auth( acc, p_acme_dir, domain,
-					token_mode=token_mode, query_httpd=not opts.dont_query_local_httpd )
-				if err: return err
-				log.debug('Authorized access to cert-domain: {!r}', domain)
+			err = cmd_domain_auth_batch( acc, cert_domain_list, opts.acme_dir, opts.challenge_file_mode,
+				opts.auth_poll_params, force=opts.auth_force, query_httpd=not opts.dont_query_local_httpd )
+			if err: return err
 
 		return cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 			key_type_list, cert_domain_list, cert_name_attrs,
