@@ -340,6 +340,17 @@ class X509CertInfo:
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
 
+def domain_auth_parse_tos_url(res):
+	for header in res.headers.get_all('Link'):
+		for v in re.split(', *<', header):
+			try: url, params = v.split(';', 1)
+			except ValueError: url, params = v, ''
+			for param in params.split(';'):
+				try: k, v = param.split('=')
+				except ValueError: break
+				if k.strip(' \'"') == 'rel' and v.strip(' \'"') == 'terms-of-service':
+					return url.strip('<> \'"')
+
 def domain_auth_filter(acc, domains):
 	for domain in domains:
 		if 'auth.domain:{}'.format(domain) in acc.meta:
@@ -381,8 +392,17 @@ def cmd_domain_auth( acc, p_acme_dir, domain,
 			log.debug(
 				'Got http-403 (error:unauthorized),'
 				' trying to update account ToS agreement' )
-			payload = payload_reg.copy()
-			payload['resource'] = 'reg'
+			# 2017-02-03: letsencrypt/boulder uses "agreement" in payload, not "terms-of-service-agreed"
+			# 2017-02-03: Trying to send "agreement" with wrong (e.g. old) URL
+			#  causes generic http-400 "malformed" error in letsencrypt/boulder,
+			#  so always trying to fetch fresh URL here before sending "agreement" payload.
+			payload, acc_tos = dict(resource='reg'), None
+			res = acc.req(acc.meta['acc.url'], payload)
+			if res.code in [200, 201, 202]: acc_tos = domain_auth_parse_tos_url(res)
+			if not acc_tos:
+				p_err('ERROR: ACME account ToS probe failed')
+				return p_err_for_req(res)
+			payload.update({'terms-of-service-agreed': True, 'agreement': acc_tos})
 			res = acc.req(acc.meta['acc.url'], payload)
 			if res.code not in [200, 201, 202]:
 				p_err('ERROR: ACME account tos agreement update failed')
@@ -808,10 +828,8 @@ def main(args=None):
 	acc_register = opts.register or acc_key_old or not acc_meta.get('acc.url')
 	acc_contact = opts.contact_email and 'mailto:{}'.format(opts.contact_email)
 
-	# 2017-02-03: "agreement" is for letsencrypt/boulder, "terms-of-service-agreed" is ignored
-	payload_reg = {
-		'terms-of-service-agreed': True,
-		'agreement': 'https://letsencrypt.org/documents/LE-SA-v1.1.1-August-1-2016.pdf' }
+	# 2017-02-03: letsencrypt/boulder uses "agreement", "terms-of-service-agreed" is ignored
+	payload_reg = {'terms-of-service-agreed': True}
 	if acc_register:
 		if not os.access(p_acc_key, os.W_OK):
 			return p_err( 'ERROR: Account registration required,'
@@ -869,6 +887,7 @@ def main(args=None):
 		acc_meta.save()
 
 	if acc_contact and acc_contact != acc_meta.get('acc.contact'):
+		log.debug('Updating account contact information')
 		res = signed_req( acc_key, acc_meta['acc.url'],
 			dict(resource='reg', contact=[acc_contact]),
 			kid=acc_meta['acc.url'], acme_url=acme_url )
