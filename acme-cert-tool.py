@@ -509,7 +509,7 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 	for key_type, ci in certs.items():
 		res = acc.req('new-cert', dict(csr=b64_b2a_jose(csr_ders[key_type])))
 		if res.code != 201:
-			p_err('ERROR: Failed to get signed cert from ACME CA', domain)
+			p_err('ERROR: Failed to get signed cert from ACME CA')
 			return p_err_for_req(res)
 		ci.cert_str = '-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n'\
 			.format('\n'.join(textwrap.wrap(base64.b64encode(res.body).decode(), 64)))
@@ -709,7 +709,7 @@ def main(args=None):
 		help='Resulting PEM filename or filename prefix'
 			' (if >1 files/certs are requested, see options below).')
 	group.add_argument('-c', '--cert-key-type',
-		metavar='type', choices=['rsa-2048', 'rsa-4096', 'ec-384'], default='ec-384',
+		action='append', metavar='type', choices=['rsa-2048', 'rsa-4096', 'ec-384'],
 		help=textwrap.dedent('''\
 			Certificate key type(s) to generate.
 			Can be used multiple times to issue same certificate for
@@ -719,7 +719,7 @@ def main(args=None):
 			 pair will be stored to different .pem file(s), with corresponding filename
 			 suffixes and an extra dot separator (if prefix does not end with one),
 			 e.g. "mycert.ec-384.pem" and "mycert.rsa-2048.pem".
-			Possible values: rsa-2048, rsa-4096, ec-384 (secp384r1). Default: %(default)s'''))
+			Possible values: rsa-2048, rsa-4096, ec-384 (secp384r1). Default: ec-384'''))
 	group.add_argument('-s', '--split-key-file', action='store_true',
 		help='Store private key in a separate .key file, while certificate to a .crt file, both'
 				' with specified filename prefix plus a dot separator, e.g. "mycert.crt" + "mycert.key".'
@@ -749,7 +749,7 @@ def main(args=None):
 	group = cmd.add_argument_group('Certificate domain authorization options',
 		description='Options for automatic authorization of'
 			' domain(s) used in a certificate, same as in "domain-auth" command.')
-	group.add_argument('-d', '--acme-dir', help=textwrap.dedent('''\
+	group.add_argument('-d', '--acme-dir', metavar='path', help=textwrap.dedent('''\
 		Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
 		Must be specified in order for authomatic
 		 authorization for cert domain(s) to be performed.
@@ -894,7 +894,9 @@ def main(args=None):
 		if res.code not in [200, 201, 202]:
 			p_err('ERROR: ACME account contact info update request failed')
 			return p_err_for_req(res)
-		log.debug('Account contact info updated: {!r} -> {!r}', acc_meta['acc.contact'], acc_contact)
+		log.debug(
+			'Account contact info updated: {!r} -> {!r}',
+			acc_meta.get('acc.contact'), acc_contact )
 		acc_meta['acc.contact'] = acc_contact
 		acc_meta.save()
 
@@ -944,8 +946,7 @@ def main(args=None):
 
 
 	elif opts.call == 'cert-issue':
-		key_type_list = ( [opts.cert_key_type]
-			if isinstance(opts.cert_key_type, str) else opts.cert_key_type )
+		key_type_list = opts.cert_key_type or ['ec-384']
 		p_cert_base = pathlib.Path(opts.file_prefix)
 		p_cert_dir, p_cert_base = p_cert_base.parent, p_cert_base.name
 		cert_domain_list = [opts.domain] + (opts.altname or list())
@@ -958,7 +959,8 @@ def main(args=None):
 
 		if opts.acme_dir:
 			log.debug('Checking authorization for {} cert-domain(s)...', len(cert_domain_list))
-			err = cmd_domain_auth_batch( acc, cert_domain_list, opts.acme_dir, opts.challenge_file_mode,
+			err = cmd_domain_auth_batch(
+				acc, cert_domain_list, opts.acme_dir, opts.challenge_file_mode,
 				opts.auth_poll_params, force=opts.auth_force, query_httpd=not opts.dont_query_local_httpd )
 			if err: return err
 
