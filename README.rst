@@ -100,17 +100,17 @@ Links
 
   200-line Python (2/3) ACME client, main source of inspiration behind this one.
 
-  Fairly bare-bones, have to be supplimented with openssl cli stuff to generate
+  Fairly bare-bones, have to be supplemented with openssl cli stuff to generate
   CSRs, relies on parsing openssl cli output, lacks (as of 2017-02-05) elliptic
   curve key support, etc.
 
 - `easy-rsa <https://github.com/OpenVPN/easy-rsa/>`_
 
-  Good set of scripts to easily setup and maintain local X.509 PKI - i.e. create
-  CA, intermediates, client/server certs - all with one or two trivial commands,
-  very configurable.
+  Good set of scripts to easily setup and maintain local X.509 PKI (e.g. that
+  has nothing to do with global TLS trust roots) - i.e. create CA, intermediates,
+  client/server certs - all with one or two trivial commands, very configurable.
 
-- Web TLS setup "Best Practices" (updated every few months):
+- Web TLS setup "Best Practices" checklists (updated every few months):
 
   - `Qualys SSL Labs <https://github.com/ssllabs/research/wiki/SSL-and-TLS-Deployment-Best-Practices>`_
   - `Mozilla <https://wiki.mozilla.org/Security/Server_Side_TLS>`_
