@@ -79,6 +79,16 @@ There is no need to run this script as root, use -m/--mode, --challenge-file-mod
 options and ACLs (``setfacl -m d:...``) to share files between different uids/gids.
 
 
+Bugs and Vulnerabilities
+------------------------
+
+- `Critical vulnerability in JSON Web Encryption (2017-03-13)
+  <http://blog.intothesymmetry.com/2017/03/critical-vulnerability-in-json-web.html>`_ -
+  an Invalid Curve Attack on JWE ECDH-ES key agreement.
+
+  Does not affect ACME protocol, as ECDH-ES is not used there at all.
+
+
 Links
 -----
 
