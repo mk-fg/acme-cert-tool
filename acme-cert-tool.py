@@ -485,7 +485,8 @@ def cmd_domain_auth( acc, p_acme_dir, domain,
 
 def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 		key_type_list, cert_domain_list, cert_name_attrs,
-		file_mode=0o600, split_key_file=False, remove_files_for_prefix=False ):
+		file_mode=0o600, split_key_file=False,
+		remove_files_for_prefix=False, raise_auth_error=False ):
 	from cryptography import x509
 	from cryptography.x509.oid import NameOID
 
@@ -515,7 +516,7 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 
 	for key_type, ci in certs.items():
 		res = acc.req('new-cert', dict(csr=b64_b2a_jose(csr_ders[key_type])))
-		if res.code == 403:
+		if raise_auth_error and res.code == 403:
 			try:
 				err_body = res.json()
 				err_id, err_msg = err_body['type'], err_body.get('detail', '[no details]')
@@ -984,7 +985,7 @@ def main(args=None):
 				return cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 					key_type_list, cert_domain_list, cert_name_attrs,
 					file_mode=file_mode, split_key_file=opts.split_key_file,
-					remove_files_for_prefix=opts.remove_files_for_prefix )
+					remove_files_for_prefix=opts.remove_files_for_prefix, raise_auth_error=not auth_force )
 			except ACMEDomainAuthError as err:
 				if not auth_possible or auth_force: raise
 				log.debug('Domain auth error for issuing cert, forcing re-auth: {}', err)
