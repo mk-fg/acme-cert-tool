@@ -211,10 +211,14 @@ class AccMeta(dict):
 
 
 class HTTPResponse:
+
 	__slots__ = 'code reason headers body'.split()
+
 	def __init__(self, *args, **kws):
 		for k,v in it.chain( zip(self.__slots__, it.repeat(None)),
 			zip(self.__slots__, args), kws.items() ): setattr(self, k, v)
+
+	def json(self): return json.loads(self.body.decode())
 
 http_req_headers = { 'Content-Type': 'application/jose+json',
 		'User-Agent': 'acme-cert-tool/1.0 (+https://github.com/mk-fg/acme-cert-tool)' }
@@ -340,6 +344,9 @@ class X509CertInfo:
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
 
+class ACMEError(Exception): pass
+class ACMEDomainAuthError(ACMEError): pass
+
 def domain_auth_parse_tos_url(res):
 	for header in res.headers.get_all('Link'):
 		for v in re.split(', *<', header):
@@ -413,7 +420,7 @@ def cmd_domain_auth( acc, p_acme_dir, domain,
 		p_err('ERROR: ACME new-authz request failed for domain: {!r}', domain)
 		return p_err_for_req(res)
 
-	for ch in json.loads(res.body.decode())['challenges']:
+	for ch in res.json()['challenges']:
 		if ch['type'] == 'http-01': break
 	else:
 		p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
@@ -445,7 +452,7 @@ def cmd_domain_auth( acc, p_acme_dir, domain,
 		log.debug('Polling domain-auth [{:02d}]: {!r}', n, domain)
 		res = http_req(token_url)
 		if res.code in [200, 202]:
-			status = json.loads(res.body.decode())['status']
+			status = res.json()['status']
 			if status == 'invalid':
 				p_err('ERROR: http-01 challenge response was rejected by ACME CA')
 				return p_err_for_req(res)
@@ -508,6 +515,14 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 
 	for key_type, ci in certs.items():
 		res = acc.req('new-cert', dict(csr=b64_b2a_jose(csr_ders[key_type])))
+		if res.code == 403:
+			try:
+				err_body = res.json()
+				err_id, err_msg = err_body['type'], err_body.get('detail', '[no details]')
+			except Exception: pass # any other kind of response
+			else:
+				if err_id == 'urn:acme:error:unauthorized':
+					raise ACMEDomainAuthError(err_id, err_msg) from None
 		if res.code != 201:
 			p_err('ERROR: Failed to get signed cert from ACME CA')
 			return p_err_for_req(res)
@@ -678,9 +693,9 @@ def main(args=None):
 		Will be created, if does not exist already.'''))
 	cmd.add_argument('domain', nargs='+',
 		help='Domain(s) to authorize for use with specified key (-k/--account-key-file).')
-	group.add_argument('-f', '--auth-force', action='store_true',
+	cmd.add_argument('-f', '--auth-force', action='store_true',
 		help='Dont skip domains which are already recorded as authorized in local acc metadata.')
-	group.add_argument('--auth-poll-params', metavar='delay:attempts',
+	cmd.add_argument('--auth-poll-params', metavar='delay:attempts',
 		help='Specific auth-result polling interval value (if ACME server'
 				' does not provide one, in seconds) and number of attempts to use.'
 			' Default is to use exponential backoff, with 60s limit and 15 attempts max over ~10min.')
@@ -957,17 +972,22 @@ def main(args=None):
 					' spec (must be attr:value): {!r}'.format(v) )
 			cert_name_attrs.append(map(str.strip, v.split(':', 1)))
 
-		if opts.acme_dir:
-			log.debug('Checking authorization for {} cert-domain(s)...', len(cert_domain_list))
-			err = cmd_domain_auth_batch(
-				acc, cert_domain_list, opts.acme_dir, opts.challenge_file_mode,
-				opts.auth_poll_params, force=opts.auth_force, query_httpd=not opts.dont_query_local_httpd )
-			if err: return err
-
-		return cmd_cert_issue( acc, p_cert_dir, p_cert_base,
-			key_type_list, cert_domain_list, cert_name_attrs,
-			file_mode=file_mode, split_key_file=opts.split_key_file,
-			remove_files_for_prefix=opts.remove_files_for_prefix )
+		auth_possible = bool(opts.acme_dir)
+		for auth_force in [opts.auth_force, True]:
+			if auth_possible:
+				log.debug('Checking authorization for {} cert-domain(s)...', len(cert_domain_list))
+				err = cmd_domain_auth_batch(
+					acc, cert_domain_list, opts.acme_dir, opts.challenge_file_mode,
+					opts.auth_poll_params, force=auth_force, query_httpd=not opts.dont_query_local_httpd )
+				if err: return err
+			try:
+				return cmd_cert_issue( acc, p_cert_dir, p_cert_base,
+					key_type_list, cert_domain_list, cert_name_attrs,
+					file_mode=file_mode, split_key_file=opts.split_key_file,
+					remove_files_for_prefix=opts.remove_files_for_prefix )
+			except ACMEDomainAuthError as err:
+				if not auth_possible: raise
+				log.debug('Domain auth error for issuing cert, forcing re-auth: {}', err)
 
 
 	elif not opts.call: parser.error('No command specified')
