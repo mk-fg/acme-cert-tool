@@ -986,7 +986,7 @@ def main(args=None):
 					file_mode=file_mode, split_key_file=opts.split_key_file,
 					remove_files_for_prefix=opts.remove_files_for_prefix )
 			except ACMEDomainAuthError as err:
-				if not auth_possible: raise
+				if not auth_possible or auth_force: raise
 				log.debug('Domain auth error for issuing cert, forcing re-auth: {}', err)
 
 
