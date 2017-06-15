@@ -26,6 +26,8 @@ Main features
 
 - Does not do anything with httpd or any other daemons and their configuration.
 
+- Uses "ACME v1" protocol supported by Let's Encrypt at the moment (2017).
+
 Can generate/use/roll-over account keys (ec-384/rsa-2048/rsa-4096,
 pem pkcs8 or openssl/pkcs1), register/query/deactivate accounts,
 authorize/deauthorize domains (via http-01 challenge), generate configurable
@@ -97,6 +99,11 @@ Links
   Original public Certificate Authority, issuing certificates for websites via
   ACME protocol to anyone at no cost.
 
+  Only supports non-IETF v1 version of ACME protocol, as of 2017, but should
+  also support IETF standardized version starting from Jan 2018
+  (`2017-06-14 announcement link
+  <https://letsencrypt.org/2017/06/14/acme-v2-api.html>`_).
+
 - `ACME client list <https://letsencrypt.org/docs/client-options/>`_
 
   List of clients compatible with Let's Encrypt and similar ACME CA services.
@@ -105,6 +112,10 @@ Links
 
   Official Let's Encrypt client, has a lot of options and plugins to e.g. mess
   with httpd configuration files, fairly heavyweight.
+
+- `IETF ACME protocol docs <https://datatracker.ietf.org/wg/acme/documents/>`_
+
+  Not supported by Let's Encrypt yet (2017).
 
 - `acme-tiny <https://github.com/diafygi/acme-tiny>`_
 
