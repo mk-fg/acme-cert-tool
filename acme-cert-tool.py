@@ -562,60 +562,62 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 def main(args=None):
 	import argparse
 
+	dedent = lambda text: (textwrap.dedent(text).strip('\n') + '\n').replace('\t', '  ')
 	class SmartHelpFormatter(argparse.HelpFormatter):
+		def __init__(self, *args, **kws):
+			return super().__init__(*args, **kws, width=100)
 		def _fill_text(self, text, width, indent):
-			return super(SmartHelpFormatter, self)._fill_text(text, width, indent)\
-				if '\n' not in text else ''.join(indent + line for line in text.splitlines(keepends=True))
+			if '\n' not in text: return super()._fill_text(text, width, indent)
+			return ''.join(indent + line for line in text.splitlines(keepends=True))
 		def _split_lines(self, text, width):
-			return super(SmartHelpFormatter, self)._split_lines(text, width)\
-				if '\n' not in text else text.splitlines()
+			return super()._split_lines(text, width)\
+				if '\n' not in text else dedent(text).splitlines()
 
 	parser = argparse.ArgumentParser(
 		formatter_class=SmartHelpFormatter,
 		description='Lets Encrypt CA interaction tool to make'
 			' it authorize domain (via http-01 challenge) and sign/renew/revoke TLS certs.',
-		epilog=textwrap.dedent('''
+		epilog=dedent('''
 			Usage examples:
 
-			  - Generate/register new account key, generate certificate for "mydomain.com"
-			    and authorize/sign it with Let's Encrypt "Fake LE Intermediate X1" staging CA:
+				- Generate/register new account key, generate certificate for "mydomain.com"
+					and authorize/sign it with Let's Encrypt "Fake LE Intermediate X1" staging CA:
 
-			      % ./acme-cert-tool.py --debug -gk le-staging.acc.key cert-issue \\
-			          -d /srv/www/.well-known/acme-challenge le-staging.cert.pem mydomain.com
+						% ./acme-cert-tool.py --debug -gk le-staging.acc.key cert-issue \\
+								-d /srv/www/.well-known/acme-challenge le-staging.cert.pem mydomain.com
 
-			    EC P-384 (default) account key (along with some metadata, as comments) will be
-			    stored in "le-staging.acc.key" file, certificate and its key (also P-384 by default)
-			    in "le-staging.cert.pem".
+					EC P-384 (default) account key (along with some metadata, as comments) will be
+					stored in "le-staging.acc.key" file, certificate and its key (also P-384 by default)
+					in "le-staging.cert.pem".
 
-			    Can be run again to generate new certificate with the same account key and
-			    domain authorization (-g/--gen-key-if-missing does not regen key files).
+					Can be run again to generate new certificate with the same account key and
+					domain authorization (-g/--gen-key-if-missing does not regen key files).
 
-			    To use non-staging server with "legit" intermediate (be sure to check ToS
-			    and limits first!), simply add "-s le" there.
+					To use non-staging server with "legit" intermediate (be sure to check ToS
+					and limits first!), simply add "-s le" there.
 
-			  - Update account contact email and print some account info:
-			      % ./acme-cert-tool.py -k le-staging.acc.key -e me@mydomain.com account-info
+				- Update account contact email and print some account info:
+						% ./acme-cert-tool.py -k le-staging.acc.key -e me@mydomain.com account-info
 
-			  - Deactivate (remove) account:
-			      % ./acme-cert-tool.py -k le-staging.acc.key account-deactivate
+				- Deactivate (remove) account:
+						% ./acme-cert-tool.py -k le-staging.acc.key account-deactivate
 
-			See more info at: https://github.com/mk-fg/acme-cert-tool
-		'''))
+			See more info at: https://github.com/mk-fg/acme-cert-tool'''))
 
 	group = parser.add_argument_group('ACME authentication')
-	group.add_argument('-k', '--account-key-file', metavar='path', help=textwrap.dedent('''\
+	group.add_argument('-k', '--account-key-file', metavar='path', help='''
 			Path to ACME domain-specific private key to use (pem with pkcs8/openssl/pkcs1).
 			All operations wrt current domain will be authenticated using this key.
 			It has nothing to do with actual issued TLS certs and cannot be reused in them.
 			Has no default value on purpose, must be explicitly specified.
 			If registered with ACME server, account URL will also be stored in the file alongside key.
 			If --gen-key (or -g/--gen-key-if-missing) is also specified,
-			 will be generated and path (incl. directories) will be created.'''))
+				will be generated and path (incl. directories) will be created.''')
 	group.add_argument('-s', '--acme-service',
-		metavar='url-or-name', default='le-staging', help=textwrap.dedent('''\
+		metavar='url-or-name', default='le-staging', help='''
 			ACME directory URL (or shortcut) of Cert Authority (CA) service to interact with.
-			Available shortcuts: le - Let\'s Encrypt, le-staging - Let\'s Encrypt staging server.
-			Default: %(default)s'''))
+			Available shortcuts: le - Let's Encrypt, le-staging - Let's Encrypt staging server.
+			Default: %(default)s''')
 
 	group = parser.add_argument_group('Domain-specific key (-k/--account-key-file) generation',
 		description='Generated keys are always stored in pem/pkcs8 format with no encryption.')
@@ -646,13 +648,14 @@ def main(args=None):
 
 	group = parser.add_argument_group('Hook options')
 	group.add_argument('-x', '--hook', action='append', metavar='hook:path',
-		help='Hook-script to run at the specified point.'
-			' Specified path must be executable (chmod +x ...), will be run synchronously,'
-				' and must exit with 0 for tool to continue operation, and non-zero to abort immediately.'
-			' Hooks are run with same uid/gid and env as the main script, can use PATH-lookup.'
-			' See --hook-list output to get full list of'
-				' all supported hook-points and arguments passed to them.'
-			' Example spec: -x domain-auth.publish-challenge:/etc/nginx/sync-frontends.sh')
+		help='''
+			Hook-script to run at the specified point.
+			Specified path must be executable (chmod +x ...), will be run synchronously, and
+				must exit with 0 for tool to continue operation, and non-zero to abort immediately.
+			Hooks are run with same uid/gid and env as the main script, can use PATH-lookup.
+			See --hook-list output to get full list of
+				all supported hook-points and arguments passed to them.
+			Example spec: -x domain-auth.publish-challenge:/etc/nginx/sync-frontends.sh''')
 	group.add_argument('--hook-timeout', metavar='seconds', type=float, default=120,
 		help='Timeout for waiting for hook-script to finish running,'
 				' before aborting the operation (treated as hook error).'
@@ -689,9 +692,9 @@ def main(args=None):
 	cmd = cmds.add_parser('domain-auth',
 		formatter_class=SmartHelpFormatter,
 		help='Authorize use of key (-k/--account-key-file) to manage certs for specified domain(s).')
-	cmd.add_argument('acme_dir', help=textwrap.dedent('''\
-		Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
-		Will be created, if does not exist already.'''))
+	cmd.add_argument('acme_dir', help='''
+		Directory that is served by domain's httpd at "/.well-known/acme-challenge/".
+		Will be created, if does not exist already.''')
 	cmd.add_argument('domain', nargs='+',
 		help='Domain(s) to authorize for use with specified key (-k/--account-key-file).')
 	cmd.add_argument('-f', '--auth-force', action='store_true',
@@ -701,12 +704,13 @@ def main(args=None):
 				' does not provide one, in seconds) and number of attempts to use.'
 			' Default is to use exponential backoff, with 60s limit and 15 attempts max over ~10min.')
 	cmd.add_argument('--dont-query-local-httpd', action='store_true',
-		help='Skip querying challege response at a local'
-				' "well-known" URLs created by this script before submitting them to ACME CA.'
-			' Default is to query e.g. "example.com/.well-known/acme-challenge/some-token" URL'
-				' immediately after script creates "some-token" file in acme_dir directory,'
-				' to make sure it would be accessible to ACME CA servers as well.'
-			' Can be skipped in configurations where local host should not be able to query that URL.')
+		help='''
+			Skip querying challege response at a local
+				"well-known" URLs created by this script before submitting them to ACME CA.
+			Default is to query e.g. "example.com/.well-known/acme-challenge/some-token" URL
+				immediately after script creates "some-token" file in acme_dir directory,
+				to make sure it would be accessible to ACME CA servers as well.
+			Can be skipped in configurations where local host should not be able to query that URL.''')
 	cmd.add_argument('-m', '--challenge-file-mode', metavar='octal', default='0644',
 		help='Separate access mode (octal) value to use for ACME challenge file in acme_dir directory.'
 			' Default is 0644 to allow read access for any uid (e.g. httpd) to these files.')
@@ -726,7 +730,7 @@ def main(args=None):
 			' (if >1 files/certs are requested, see options below).')
 	group.add_argument('-c', '--cert-key-type',
 		action='append', metavar='type', choices=['rsa-2048', 'rsa-4096', 'ec-384'],
-		help=textwrap.dedent('''\
+		help='''
 			Certificate key type(s) to generate.
 			Can be used multiple times to issue same certificate for
 			 multiple different keys, e.g. ec-384 cert and a fallback
@@ -735,7 +739,7 @@ def main(args=None):
 			 pair will be stored to different .pem file(s), with corresponding filename
 			 suffixes and an extra dot separator (if prefix does not end with one),
 			 e.g. "mycert.ec-384.pem" and "mycert.rsa-2048.pem".
-			Possible values: rsa-2048, rsa-4096, ec-384 (secp384r1). Default: ec-384'''))
+			Possible values: rsa-2048, rsa-4096, ec-384 (secp384r1). Default: ec-384''')
 	group.add_argument('-s', '--split-key-file', action='store_true',
 		help='Store private key in a separate .key file, while certificate to a .crt file, both'
 				' with specified filename prefix plus a dot separator, e.g. "mycert.crt" + "mycert.key".'
@@ -753,24 +757,24 @@ def main(args=None):
 		help='Extra domain(s) that certificate should be valid for.'
 			' Will be used in a certificate SubjectAltName extension field.')
 	group.add_argument('-i', '--cert-name-attrs',
-		action='append', metavar='attr:value', help=textwrap.dedent('''\
+		action='append', metavar='attr:value', help='''
 			Additional attributes to include in the X.509 Name, in attr=value format.
 			This option can be used multiple times, attributes
 			 will be added in the same order with CN from "domain" arg at the end.
 			See list of recognized "attr" names (case-insensitive) in cryptography.io docs:
 			 https://cryptography.io/en/latest/x509/reference/#object-identifiers
 			For example, to have country and email attrs in the cert, use:
-			 -i country_name:US -i  email_address:user@myhost.com'''))
+			 -i country_name:US -i  email_address:user@myhost.com''')
 
 	group = cmd.add_argument_group('Certificate domain authorization options',
 		description='Options for automatic authorization of'
 			' domain(s) used in a certificate, same as in "domain-auth" command.')
-	group.add_argument('-d', '--acme-dir', metavar='path', help=textwrap.dedent('''\
-		Directory that is served by domain\'s httpd at "/.well-known/acme-challenge/".
+	group.add_argument('-d', '--acme-dir', metavar='path', help='''
+		Directory that is served by domain's httpd at "/.well-known/acme-challenge/".
 		Must be specified in order for authomatic
 		 authorization for cert domain(s) to be performed.
 		If not specified, domains are assumed to be pre-authorized.
-		Will be created, if does not exist already.'''))
+		Will be created, if does not exist already.''')
 	group.add_argument('-f', '--auth-force', action='store_true',
 		help='Dont skip domains which are already recorded as authorized in local acc metadata.')
 	group.add_argument('--auth-poll-params', metavar='delay:attempts',
