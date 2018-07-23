@@ -65,7 +65,7 @@ for a specific command.
 Installation
 ------------
 
-Install python3 and `cryptography <https://cryptography.io/>`_ module::
+Install python3 (3.6+) and `cryptography <https://cryptography.io/>`_ module::
 
   # pacman -S python python-cryptography
 
