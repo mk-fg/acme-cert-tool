@@ -553,8 +553,9 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 	acc.hooks.run('cert.stored', *filter(None, files_used))
 
 	if remove_files_for_prefix:
+		p_prefix = f'{p_cert_base}.'
 		for p in p_cert_dir.iterdir():
-			if p.is_dir() or p.name in files_used: continue
+			if p.is_dir() or p.name in files_used or not p.name.startswith(p_prefix): continue
 			log.debug('Removing unused matching-prefix file: {}', p.name)
 			p.unlink()
 
