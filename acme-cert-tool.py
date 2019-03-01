@@ -65,12 +65,36 @@ indent_lines = lambda text,indent='  ',prefix='\n': ( (prefix if text else '') +
 	''.join('{}{}'.format(indent, line) for line in text.splitlines(keepends=True)) )
 
 p_err = lambda *a,**k: p(*a, file=sys.stderr, **k) or 1
-p_err_for_req = lambda res: p_err(
-	'Server response: {} {}\nHeaders: {}Body: {}',
-	res.code or '-', res.reason or '-',
-	indent_lines(''.join( '{}: {}\n'.format(k, v)
-		for k, v in (res.headers.items() if res.headers else list()) )),
-	indent_lines(res.body.decode()) )
+
+def retries_within_timeout( tries, timeout,
+		backoff_func=lambda e,n: ((e**n-1)/e), slack=1e-2 ):
+	'Return list of delays to make exactly n tires within timeout, with backoff_func.'
+	a, b = 0, timeout
+	while True:
+		m = (a + b) / 2
+		delays = list(backoff_func(m, n) for n in range(tries))
+		error = sum(delays) - timeout
+		if abs(error) < slack: return delays
+		elif error > 0: b = m
+		else: a = m
+
+def p_err_for_req(res, final=False):
+	if not final:
+		# Handle https://community.letsencrypt.org/t/jws-has-invalid-anti-replay-nonce/30020/10
+		# "status=400 type=urn:acme:error:badNonce" still happens at 2019-03-01
+		if res.code == 400:
+			try: res_json = json.loads(res.body.decode())
+			except ValueError: pass
+			else:
+				if ( res_json['status'] == 400 and
+						res_json['type'] == 'urn:acme:error:badNonce' ):
+					raise ACMEServerBug('urn:acme:error:badNonce', res)
+	return p_err(
+		'Server response: {} {}\nHeaders: {}Body: {}',
+		res.code or '-', res.reason or '-',
+		indent_lines(''.join( '{}: {}\n'.format(k, v)
+			for k, v in (res.headers.items() if res.headers else list()) )),
+		indent_lines(res.body.decode()) )
 
 
 
@@ -347,6 +371,22 @@ class X509CertInfo:
 class ACMEError(Exception): pass
 class ACMEDomainAuthError(ACMEError): pass
 
+# See e.g. https://community.letsencrypt.org/t/jws-has-invalid-anti-replay-nonce/30020/10
+class ACMEServerBug(Exception): pass
+
+def acme_bug_retry(func, *args, retry_n=0, retry_timeout=0, **kws):
+	delays = ( retries_within_timeout(retry_n, retry_timeout)
+		if (retry_n or 0) > 0 and (retry_timeout or 0) > 0 else list() )
+	for delay in delays + [0]:
+		try: func_res = func(*args, **kws)
+		except ACMEServerBug as err:
+			err_type, err_res = err.args
+			log.debug( 'Got known ACME bug {!r}, retry in: {}',
+				err_type, f'{delay:.1f}s' if delay else 'no-retries-left' )
+		else: return func_res
+		if delay: time.sleep(delay)
+	return p_err_for_req(err_res, final=True)
+
 def domain_auth_parse_tos_url(res):
 	for header in res.headers.get_all('Link'):
 		for v in re.split(', *<', header):
@@ -367,7 +407,7 @@ def domain_auth_filter(acc, domains):
 
 def cmd_domain_auth_batch( acc, domains,
 		opt_acme_dir, opt_challenge_file_mode, opt_poll_params,
-		auth_log=None, force=False, query_httpd=True ):
+		auth_log=None, force=False, query_httpd=True, acme_retry=dict() ):
 	p_acme_dir = pathlib.Path(opt_acme_dir)
 	p_acme_dir.mkdir(parents=True, exist_ok=True)
 	token_mode = int(opt_challenge_file_mode, 8) & 0o777
@@ -380,8 +420,8 @@ def cmd_domain_auth_batch( acc, domains,
 	for domain in domains:
 		log.debug('Authorizing access to domain: {!r}', domain)
 		acc.hooks.run('domain-auth.start', domain)
-		err = cmd_domain_auth( acc, p_acme_dir, domain,
-			token_mode=token_mode, query_httpd=query_httpd, **poll_opts )
+		err = acme_bug_retry( cmd_domain_auth, acc, p_acme_dir, domain,
+			token_mode=token_mode, query_httpd=query_httpd, **poll_opts, **acme_retry )
 		if err: return err
 		acc.hooks.run('domain-auth.done', domain)
 		(auth_log or log.debug)('Authorized access to domain: {!r}', domain)
@@ -486,7 +526,7 @@ def cmd_domain_auth( acc, p_acme_dir, domain,
 def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 		key_type_list, cert_domain_list, cert_name_attrs,
 		file_mode=0o600, split_key_file=False,
-		remove_files_for_prefix=False, raise_auth_error=False ):
+		remove_files_for_prefix=False, raise_auth_error=False, acme_retry=dict() ):
 	from cryptography import x509
 	from cryptography.x509.oid import NameOID
 
@@ -515,7 +555,8 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 		csr_ders[key_type] = csr_der
 
 	for key_type, ci in certs.items():
-		res = acc.req('new-cert', dict(csr=b64_b2a_jose(csr_ders[key_type])))
+		res = acme_bug_retry( acc.req, 'new-cert',
+			dict(csr=b64_b2a_jose(csr_ders[key_type])), **acme_retry )
 		if raise_auth_error and res.code == 403:
 			try:
 				err_body = res.json()
@@ -605,7 +646,7 @@ def main(args=None):
 
 			See more info at: https://github.com/mk-fg/acme-cert-tool'''))
 
-	group = parser.add_argument_group('ACME authentication')
+	group = parser.add_argument_group('ACME service options')
 	group.add_argument('-k', '--account-key-file', metavar='path', help='''
 			Path to ACME domain-specific private key to use (pem with pkcs8/openssl/pkcs1).
 			All operations wrt current domain will be authenticated using this key.
@@ -619,6 +660,12 @@ def main(args=None):
 			ACME directory URL (or shortcut) of Cert Authority (CA) service to interact with.
 			Available shortcuts: le - Let's Encrypt, le-staging - Let's Encrypt staging server.
 			Default: %(default)s''')
+	group.add_argument('--acme-bug-retries',
+		metavar='n:timeout', default='5:300', help='''
+			Number of authentication retries with exp-backoff
+				to make within specified timeout for well-known ACME server bugs.
+			Example can be server returning "urn:acme:error:badNonce" randomly.
+			Setting this to 0 or empty value will disable such retry logic. Default: %(default)s''')
 
 	group = parser.add_argument_group('Domain-specific key (-k/--account-key-file) generation',
 		description='Generated keys are always stored in pem/pkcs8 format with no encryption.')
@@ -842,6 +889,13 @@ def main(args=None):
 	log.debug( 'Using {} domain key: {} (acme acc url: {})',
 		acc_key.t, acc_key.pk_hash, acc_meta.get('acc.url') )
 
+	acme_retry_opts = dict(retry_n=0, retry_timeout=0)
+	if opts.acme_bug_retries:
+		try: n, timeout = opts.acme_bug_retries.split(':', 1)
+		except ValueError: n, timeout = opts.acme_bug_retries, 300
+		acme_retry_opts.update(retry_n=int(n), retry_timeout=float(timeout))
+	acme_retry_wrap = ft.partial(acme_bug_retry, **acme_retry_opts)
+
 
 	### Handle account status
 
@@ -872,7 +926,8 @@ def main(args=None):
 			if not acc_url_old:
 				log.debug( 'Old key file (-o/--account-key-file-old) does'
 					' not have registration URL, will be fetched via new-reg request' )
-				res = signed_req(acc_key_old, 'new-reg', payload_reg, acme_url=acme_url)
+				res = acme_retry_wrap( signed_req,
+					acc_key_old, 'new-reg', payload_reg, acme_url=acme_url )
 				if res.code not in [201, 409]:
 					p_err('ERROR: ACME new-reg'
 						' request for old key (-o/--account-key-file-old) failed')
@@ -881,7 +936,8 @@ def main(args=None):
 
 		if not acc_key_old: # new-reg
 			if acc_contact: payload_reg['contact'] = [acc_contact]
-			res = signed_req(acc_key, 'new-reg', payload_reg, acme_url=acme_url)
+			res = acme_retry_wrap( signed_req,
+				acc_key, 'new-reg', payload_reg, acme_url=acme_url )
 			if res.code not in [201, 409]:
 				p_err('ERROR: ACME new-reg (key registration) request failed')
 				return p_err_for_req(res)
@@ -898,7 +954,8 @@ def main(args=None):
 			# According to https://tools.ietf.org/html/draft-ietf-acme-acme-04#section-5.2 ,
 			#  only new-reg and revoke-cert should have jwk instead of kid,
 			#  but 6.3.2 explicitly mentions jwks, so guess it should also be exception here.
-			res = signed_req(acc_key_old, url, payload, nonce=nonce, resource=resource)
+			res = acme_retry_wrap( signed_req,
+				acc_key_old, url, payload, nonce=nonce, resource=resource )
 			if res.code not in [200, 201, 202]:
 				p_err('ERROR: ACME account key-change request failed')
 				return p_err_for_req(res)
@@ -909,7 +966,8 @@ def main(args=None):
 
 	if acc_contact and acc_contact != acc_meta.get('acc.contact'):
 		log.debug('Updating account contact information')
-		res = signed_req( acc_key, acc_meta['acc.url'],
+		res = acme_retry_wrap( signed_req,
+			acc_key, acc_meta['acc.url'],
 			dict(resource='reg', contact=[acc_contact]),
 			kid=acc_meta['acc.url'], acme_url=acme_url )
 		if res.code not in [200, 201, 202]:
@@ -928,14 +986,15 @@ def main(args=None):
 	### Handle commands
 
 	if opts.call == 'account-info':
-		res = acc.req(acc.meta['acc.url'], dict(resource='reg'))
+		res = acme_retry_wrap(acc.req, acc.meta['acc.url'], dict(resource='reg'))
 		if res.code not in [200, 201, 202]:
 			p_err('ERROR: ACME account info request failed')
 			return p_err_for_req(res)
 		p(res.body.decode())
 
 	elif opts.call == 'account-deactivate':
-		res = acc.req(acc.meta['acc.url'], dict(resource='reg', status='deactivated'))
+		res = acme_retry_wrap( acc.req,
+			acc.meta['acc.url'], dict(resource='reg', status='deactivated') )
 		if res.code != 200:
 			p_err('ERROR: ACME account deactivation request failed')
 			return p_err_for_req(res)
@@ -948,13 +1007,14 @@ def main(args=None):
 
 	elif opts.call == 'domain-auth':
 		return cmd_domain_auth_batch(
-			acc, opts.domain, opts.acme_dir, opts.challenge_file_mode, opts.auth_poll_params,
-			auth_log=log.info, force=opts.auth_force, query_httpd=not opts.dont_query_local_httpd )
+			acc, opts.domain, opts.acme_dir, opts.challenge_file_mode,
+			opts.auth_poll_params, auth_log=log.info, force=opts.auth_force,
+			query_httpd=not opts.dont_query_local_httpd, acme_retry=acme_retry_opts )
 
 	elif opts.call == 'domain-deauth':
 		for domain in opts.domain:
 			log.debug('Deauthorizing access to domain: {!r}', domain)
-			res = acc.req(
+			res = acme_retry_wrap( acc.req,
 				acc.meta['auth.domain:{}'.format(domain)],
 				dict(resource='authz', status='deactivated') )
 			if res.code != 200:
@@ -990,7 +1050,8 @@ def main(args=None):
 				return cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 					key_type_list, cert_domain_list, cert_name_attrs,
 					file_mode=file_mode, split_key_file=opts.split_key_file,
-					remove_files_for_prefix=opts.remove_files_for_prefix, raise_auth_error=not auth_force )
+					remove_files_for_prefix=opts.remove_files_for_prefix,
+					raise_auth_error=not auth_force, acme_retry=acme_retry_opts )
 			except ACMEDomainAuthError as err:
 				if not auth_possible or auth_force: raise
 				log.debug('Domain auth error for issuing cert, forcing re-auth: {}', err)
