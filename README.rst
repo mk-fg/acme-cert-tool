@@ -26,7 +26,7 @@ Main features
 
 - Does not do anything with httpd or any other daemons and their configuration.
 
-- Uses "ACME v1" protocol supported by Let's Encrypt at the moment (2017).
+- Uses "ACME v1" protocol supported by Let's Encrypt at the moment.
 
 Can generate/use/roll-over account keys (ec-384/rsa-2048/rsa-4096,
 pem pkcs8 or openssl/pkcs1), register/query/deactivate accounts,
@@ -44,12 +44,17 @@ Usage example
 
 ::
 
-  % ./acme-cert-tool.py --debug -gk le-staging.acc.key cert-issue \
+  % ./acme-cert-tool.py --debug -gk le-staging.acc cert-issue \
       -d /srv/www/.well-known/acme-challenge le-staging.cert.pem mydomain.com
 
-EC P-384 (default) account key (along with some metadata, as comments)
-will be stored in "le-staging.acc.key" file, certificate and its key
-(also P-384 by default) in "le-staging.cert.pem".
+EC P-384 (default) account key (along with some metadata, as comments) will be
+stored in "le-staging.acc" file (note: account key has nothing to do with
+certificate), certificate **and its key** (also P-384 by default) in "le-staging.cert.pem".
+
+When configuring Web Server after that, it should use that "le-staging.cert.pem"
+as both certificate and key (both are there, see also -s/--split-key-file option),
+and should also probably include any intermediate certificates necessary
+from `Let's Encrypt "Chain of Trust" page`_ (can be bundled into .pem via hook).
 
 Can be re-run to generate new certificate there (i.e. renew) with the same
 account key and domain authorization (-g/--gen-key-if-missing does not regen key files).
@@ -103,6 +108,11 @@ Links
   also support IETF standardized version starting from Jan 2018
   (`2017-06-14 announcement link
   <https://letsencrypt.org/2017/06/14/acme-v2-api.html>`_).
+
+- `Let's Encrypt "Chain of Trust" page <https://letsencrypt.org/certificates/>`_
+
+  Links to intermediate certificates that can be required for validation in some apps,
+  though browsers usually include these already.
 
 - `ACME client list <https://letsencrypt.org/docs/client-options/>`_
 
