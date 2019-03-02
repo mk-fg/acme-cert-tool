@@ -35,7 +35,7 @@ X.509 CSRs (ec-384/rsa-2048/rsa-4096 keys, pem openssl/pkcs1 for certs and keys)
 sign these through ACME CA.
 
 Hook scripts can be used at multiple points to integrate script into whatever
-setup (e.g. sync challenge files, reload httpd, introduce delays, etc),
+setup (e.g. sync challenge files, reload httpd, process keys, introduce delays, etc),
 see ``./acme-cert-tool.py --hook-list`` for more info on these.
 
 
@@ -49,18 +49,18 @@ Usage example
 
 EC P-384 (default) account key (along with some metadata, as comments) will be
 stored in "le-staging.acc" file (note: account key has nothing to do with
-certificate), certificate **and its key** (also P-384 by default) in "le-staging.cert.pem".
-
-When configuring Web Server after that, it should use that "le-staging.cert.pem"
-as both certificate and key (both are there, see also -s/--split-key-file option),
-and should also probably include any intermediate certificates necessary
-from `Let's Encrypt "Chain of Trust" page`_ (can be bundled into .pem via hook).
+certificate), certificate and its key (also P-384 by default) in "le-staging.cert.pem".
 
 Can be re-run to generate new certificate there (i.e. renew) with the same
 account key and domain authorization (-g/--gen-key-if-missing does not regen key files).
 
 To use non-staging server with "legit" intermediate
 (be sure to check ToS and limits first!), simply add "-s le" there.
+
+When configuring Web Server after that, it should use resulting \*.pem
+as both certificate and key (see also -s/--split-key-file option),
+and should also probably include any intermediate certificates necessary
+from `Let's Encrypt "Chain of Trust" page`_ (can be bundled into .pem via hook).
 
 Run ``./acme-cert-tool.py -h`` to get more information on all supported commands
 and options, and e.g. ``./acme-cert-tool.py cert-issue -h`` to see info and options
@@ -90,10 +90,24 @@ Bugs and Vulnerabilities
 ------------------------
 
 - `Critical vulnerability in JSON Web Encryption (2017-03-13)
-  <http://blog.intothesymmetry.com/2017/03/critical-vulnerability-in-json-web.html>`_ -
-  an Invalid Curve Attack on JWE ECDH-ES key agreement.
+  <http://blog.intothesymmetry.com/2017/03/critical-vulnerability-in-json-web.html>`_
 
-  Does not affect ACME protocol, as ECDH-ES is not used there at all.
+  | An Invalid Curve Attack on JWE ECDH-ES key agreement.
+  | Does not affect ACME protocol, as ECDH-ES is not used there at all.
+
+- `Chaining Remote Web Vulnerabilities to Abuse Let's Encrypt (2017-08-29)
+  <https://www.mike-gualtieri.com/posts/chaining-remote-web-vulnerabilities-to-abuse-lets-encrypt>`_
+
+  Not strictly a protocol vulnerability, but more of a note on how leaving
+  something like poor path permissions or insecure site uploads which can drop
+  files to e.g. /var/www/htdocs/.well-known/acme-challenge can lead to someone
+  else issuing valid certs for the site for phishing purposes or such - beware.
+
+- `ACME TLS-SNI-01 validation vulnerability (2018-01-12)
+  <https://labs.detectify.com/2018/01/12/how-i-exploited-acme-tls-sni-01-issuing-lets-encrypt-ssl-certs-for-any-domain-using-shared-hosting/>`_
+
+  | Does not affect this app, as it only uses http-01 validation.
+  | TLS-SNI-01 itself was immediately disabled due to vulnerability to such attacks.
 
 
 Links
