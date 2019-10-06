@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys, stat, tempfile, pathlib, contextlib, logging, re
+import os, sys, stat, tempfile, contextlib, logging, re, pathlib as pl
 import time, math, base64, hashlib, json, email.utils, textwrap
 
 from urllib.request import urlopen, Request, URLError, HTTPError
@@ -14,8 +14,8 @@ crypto_backend = default_backend()
 
 
 acme_ca_shortcuts = dict(
-	le='https://acme-v01.api.letsencrypt.org/directory',
-	le_staging='https://acme-staging.api.letsencrypt.org/directory' )
+	le='https://acme-v02.api.letsencrypt.org/directory',
+	le_staging='https://acme-staging-v02.api.letsencrypt.org/directory' )
 
 
 class LogMessage:
@@ -53,6 +53,11 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 			except OSError: pass
 
 
+class adict(dict):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.__dict__ = self
+
 def p(*a, file=None, end='\n', flush=False, **k):
 	if len(a) > 0:
 		fmt, a = a[0], a[1:]
@@ -79,35 +84,38 @@ def retries_within_timeout( tries, timeout,
 		else: a = m
 
 def p_err_for_req(res, final=False):
-	if not final:
-		# Handle https://community.letsencrypt.org/t/jws-has-invalid-anti-replay-nonce/30020/10
-		# "status=400 type=urn:acme:error:badNonce" still happens at 2019-03-01
+	if not final: # any known retry-quirks should be identified here
+		# Check for Replay Protection issue
+		#  https://tools.ietf.org/html/rfc8555#section-6.5
 		if res.code == 400:
 			try: res_json = json.loads(res.body.decode())
 			except ValueError: pass
 			else:
 				if ( res_json['status'] == 400 and
 						res_json['type'] == 'urn:acme:error:badNonce' ):
-					raise ACMEServerBug('urn:acme:error:badNonce', res)
+					raise ACMEAuthRetry('bad_nonce', res)
 	return p_err(
 		'Server response: {} {}\nHeaders: {}Body: {}',
 		res.code or '-', res.reason or '-',
 		indent_lines(''.join( '{}: {}\n'.format(k, v)
 			for k, v in (res.headers.items() if res.headers else list()) )),
-		indent_lines(res.body.decode()) )
+		indent_lines((res.body or b'').decode()) )
 
 
+def zero_pad(data, bs):
+	data = data.lstrip(b'\0')
+	if len(data) < bs: data = b'\0'*(bs - len(data)) + data
+	assert len(data) == bs
+	return data
 
 def b64_b2a_jose(data, uint_len=None):
 	# https://jose.readthedocs.io/en/latest/
-	if uint_len in [True, 'auto']:
-		uint_len = divmod(math.log(data, 2), 8)
-		uint_len = int(uint_len[0]) + 1 * (uint_len[1] != 0)
+	# https://tools.ietf.org/html/draft-ietf-jose-json-web-signature-37#appendix-C
 	if uint_len is not None:
 		data = data.to_bytes(uint_len, 'big', signed=False)
 		# print(':'.join('{:02x}'.format(b) for b in data))
 	if isinstance(data, str): data = data.encode()
-	return base64.urlsafe_b64encode(data).replace(b'=', b'').decode()
+	return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
 
 def generate_crypto_key(key_type):
 	if key_type.startswith('rsa-'):
@@ -120,6 +128,7 @@ def generate_crypto_key(key_type):
 
 
 class AccKey:
+
 	_slots = 't sk pk_hash jwk jwk_thumbprint jws_alg sign_func'.split()
 	def __init__(self, *args, **kws):
 		for k,v in it.chain(zip(self._slots, args), kws.items()): setattr(self, k, v)
@@ -132,8 +141,8 @@ class AccKey:
 		pk_nums = self.sk.public_key().public_numbers()
 		if self.t.startswith('rsa-'):
 			jwk = dict( kty='RSA',
-				n=b64_b2a_jose(pk_nums.n, True),
-				e=b64_b2a_jose(pk_nums.e, True) )
+				n=b64_b2a_jose(pk_nums.n, int(self.t[4:]) // 16),
+				e=b64_b2a_jose(pk_nums.e, 3) )
 		elif self.t == 'ec-384':
 			jwk = dict( kty='EC', crv='P-384',
 				x=b64_b2a_jose(pk_nums.x, 48),
@@ -141,6 +150,7 @@ class AccKey:
 		else: raise ValueError(self.t)
 		digest = hashes.Hash(hashes.SHA256(), crypto_backend)
 		digest.update(json.dumps(jwk, sort_keys=True, separators=(',', ':')).encode())
+		log.debug('Key JWK: {}', jwk) # XXX: debug
 		return jwk, b64_b2a_jose(digest.finalize())
 
 	def _pk_hash(self, trunc_len=8):
@@ -166,12 +176,13 @@ class AccKey:
 		# Resulting DER struct: 0x30 b1 ( 0x02 b2 (vr) 0x02 b3 (vs) )
 		#  where: b1 = length of stuff after it, b2 = len(vr), b3 = len(vs)
 		#  vr and vs are encoded as signed ints, so can have extra leading 0x00
+		# See JWA - https://tools.ietf.org/html/rfc7518#section-3.4
 		sig_der = sk.sign(data, signature_algorithm=ec.ECDSA(hashes.SHA384()))
 		rs_len, rn, r_len = sig_der[1], 4, sig_der[3]
 		sn, s_len = rn + r_len + 2, sig_der[rn + r_len + 1]
 		assert sig_der[0] == 0x30 and sig_der[rn-2] == sig_der[sn-2] == 0x02
 		assert rs_len + 2 == len(sig_der) == r_len + s_len + 6
-		r, s = sig_der[rn:rn+r_len].lstrip(b'\0'), sig_der[sn:sn+s_len].lstrip(b'\0')
+		r, s = zero_pad(sig_der[rn:rn+r_len], 48), zero_pad(sig_der[sn:sn+s_len], 48)
 		return r + s
 
 	@classmethod
@@ -234,8 +245,13 @@ class AccMeta(dict):
 				dst.write('## acme.{}: {}\n'.format(k, json.dumps(v)))
 
 
+class ACMEServer(str): __slots__ = 'd', # /directory cache
+
 class HTTPResponse:
 
+	# Note: headers are set as-is from urllib response headers,
+	#  which are HTTPMessage, based on email.message.Message,
+	#  and are matched there in case-insensitive manner.
 	__slots__ = 'code reason headers body'.split()
 
 	def __init__(self, *args, **kws):
@@ -245,7 +261,7 @@ class HTTPResponse:
 	def json(self): return json.loads(self.body.decode())
 
 http_req_headers = { 'Content-Type': 'application/jose+json',
-		'User-Agent': 'acme-cert-tool/1.0 (+https://github.com/mk-fg/acme-cert-tool)' }
+	'User-Agent': 'acme-cert-tool/1.0 (+https://github.com/mk-fg/acme-cert-tool)' }
 
 def http_req(url, data=None, headers=None, **req_kws):
 	req_headers = http_req_headers.copy()
@@ -259,20 +275,19 @@ def http_req(url, data=None, headers=None, **req_kws):
 	except URLError as r: res = HTTPResponse(reason=r.reason)
 	return res
 
-def signed_req_body( acc_key, payload, kid=None,
-		nonce=None, url=None, resource=None, encode=True ):
+def signed_req_body(acc_key, payload, nonce=None, kid=None, url=None, encode=True):
 	# For all of the boulder-specific quirks implemented here, see:
 	#  letsencrypt/boulder/blob/d26a54b/docs/acme-divergences.md
-	kid = None # 2017-02-03: for letsencrypt/boulder, always requires jwk
 	protected = dict(alg=acc_key.jws_alg, url=url)
 	if not kid: protected['jwk'] = acc_key.jwk
 	else: protected['kid'] = kid
-	if nonce: protected['nonce'] = nonce
+	if nonce: # only keyChange requires no-nonce payload
+		if not re.search(r'^[-_a-zA-Z0-9]+$', nonce):
+			# rfc8555#section-6.5.1 says that client MUST validate nonce
+			raise ACMEError(f'Invalid nonce format: {nonce}')
+		protected['nonce'] = nonce
 	if url: protected['url'] = url
 	protected = b64_b2a_jose(json.dumps(protected))
-	# 2017-02-03: "resource" is for letsencrypt/boulder
-	if ( resource and isinstance(payload, dict)
-		and 'resource' not in payload ): payload['resource'] = resource
 	if not isinstance(payload, str):
 		if not isinstance(payload, bytes): payload = json.dumps(payload)
 		payload = b64_b2a_jose(payload)
@@ -282,25 +297,29 @@ def signed_req_body( acc_key, payload, kid=None,
 	if encode: body = json.dumps(body).encode()
 	return body
 
-def signed_req( acc_key, url, payload, kid=None,
-		nonce=None, resource=None, acme_url=None ):
+def signed_req(acc_key, url, payload=None, kid=None, nonce=None, acme_url=None):
 	url_full = url if ':' in url else None
 	if not url_full or not nonce:
-		# 2017-02-03: letsencrypt/boulder does not implement
-		#  new-nonce, so query directory instead, when it is needed.
 		assert acme_url, [url, acme_url] # need to query directory
-		log.debug('Sending acme-directory http request to: {!r}', acme_url)
-		with urlopen(acme_url) as r:
-			assert r.getcode() == 200
-			acme_dir = json.load(r)
-			nonce = r.headers['Replay-Nonce']
-		if not url_full: url_full = acme_dir[url]
-		if not resource: resource = url
-	body = signed_req_body( acc_key, payload,
-		kid=kid, nonce=nonce, url=url_full, resource=resource )
+		if not acme_url.d:
+			log.debug('Sending acme-directory http request to: {!r}', acme_url)
+			with urlopen(acme_url) as r:
+				assert r.getcode() == 200
+				acme_url.d = adict(json.load(r))
+		if not url_full:
+			try: url_full = acme_url.d[url]
+			except KeyError:
+				log.debug('Missing directory entry {!r}: {}', url, acme_url.d)
+				raise
+		if not nonce:
+			with urlopen(acme_url.d.newNonce) as r:
+				nonce = r.headers['Replay-Nonce']
+	body = signed_req_body(acc_key, payload, kid=kid, nonce=nonce, url=url_full)
 	log.debug('Sending signed http request to URL: {!r} ...', url_full)
+	log.debug('Signed request body: {}', indent_lines( # XXX: debug
+		json.dumps(json.loads(body), sort_keys=True, indent=2) ))
 	res = http_req(url_full, body)
-	log.debug('... http reponse: {} {}', res.code or '-', res.reason or '?')
+	log.debug('... http response: {} {}', res.code or '-', res.reason or '?')
 	return res
 
 
@@ -371,32 +390,27 @@ class X509CertInfo:
 class ACMEError(Exception): pass
 class ACMEDomainAuthError(ACMEError): pass
 
-# See e.g. https://community.letsencrypt.org/t/jws-has-invalid-anti-replay-nonce/30020/10
-class ACMEServerBug(Exception): pass
+class ACMEAuthRetry(Exception): pass
 
-def acme_bug_retry(func, *args, retry_n=0, retry_timeout=0, **kws):
+def acme_auth_retry(func, *args, retry_n=0, retry_timeout=0, **kws):
 	delays = ( retries_within_timeout(retry_n, retry_timeout)
 		if (retry_n or 0) > 0 and (retry_timeout or 0) > 0 else list() )
+	kws_for_attempt = dict()
 	for delay in delays + [0]:
-		try: func_res = func(*args, **kws)
-		except ACMEServerBug as err:
+		func_kws = kws.copy()
+		if kws_for_attempt:
+			func_kws.update(kws_for_attempt)
+			kws_for_attempt.clear()
+		try: func_res = func(*args, **func_kws)
+		except ACMEAuthRetry as err:
 			err_type, err_res = err.args
-			log.debug( 'Got known ACME bug {!r}, retry in: {}',
+			log.debug( 'Got known ACME auth issue {!r}, retry in: {}',
 				err_type, f'{delay:.1f}s' if delay else 'no-retries-left' )
+			if err_type == 'bad_nonce' and 'Replay-Nonce' in res.headers:
+				kws_for_attempt['nonce'] = res.headers['Replay-Nonce']
 		else: return func_res
 		if delay: time.sleep(delay)
 	return p_err_for_req(err_res, final=True)
-
-def domain_auth_parse_tos_url(res):
-	for header in res.headers.get_all('Link'):
-		for v in re.split(', *<', header):
-			try: url, params = v.split(';', 1)
-			except ValueError: url, params = v, ''
-			for param in params.split(';'):
-				try: k, v = param.split('=')
-				except ValueError: break
-				if k.strip(' \'"') == 'rel' and v.strip(' \'"') == 'terms-of-service':
-					return url.strip('<> \'"')
 
 def domain_auth_filter(acc, domains):
 	for domain in domains:
@@ -408,7 +422,8 @@ def domain_auth_filter(acc, domains):
 def cmd_domain_auth_batch( acc, domains,
 		opt_acme_dir, opt_challenge_file_mode, opt_poll_params,
 		auth_log=None, force=False, query_httpd=True, acme_retry=dict() ):
-	p_acme_dir = pathlib.Path(opt_acme_dir)
+	'Wrapper around multiple domain authorizations to run hooks and do common init stuff.'
+	p_acme_dir = pl.Path(opt_acme_dir)
 	p_acme_dir.mkdir(parents=True, exist_ok=True)
 	token_mode = int(opt_challenge_file_mode, 8) & 0o777
 	if not force: domains = list(domain_auth_filter(acc, domains))
@@ -420,7 +435,7 @@ def cmd_domain_auth_batch( acc, domains,
 	for domain in domains:
 		log.debug('Authorizing access to domain: {!r}', domain)
 		acc.hooks.run('domain-auth.start', domain)
-		err = acme_bug_retry( cmd_domain_auth, acc, p_acme_dir, domain,
+		err = acme_auth_retry( cmd_domain_auth, acc, p_acme_dir, domain,
 			token_mode=token_mode, query_httpd=query_httpd, **poll_opts, **acme_retry )
 		if err: return err
 		acc.hooks.run('domain-auth.done', domain)
@@ -430,94 +445,85 @@ def cmd_domain_auth_batch( acc, domains,
 def cmd_domain_auth( acc, p_acme_dir, domain,
 		token_mode=0o600, query_httpd=True,
 		poll_interval=lambda n: min(60, (2**n - 1) / 5), poll_attempts=15 ):
-	payload_domain = dict(identifier=dict(type='dns', value=domain))
-	res = acc.req('new-authz', payload_domain)
-	if res.code == 403:
-		try: tos_error = json.loads(res.body)['type'] == 'urn:acme:error:unauthorized'
-		except: tos_error = False
-		if tos_error:
-			log.debug(
-				'Got http-403 (error:unauthorized),'
-				' trying to update account ToS agreement' )
-			# 2017-02-03: letsencrypt/boulder uses "agreement" in payload, not "terms-of-service-agreed"
-			# 2017-02-03: Trying to send "agreement" with wrong (e.g. old) URL
-			#  causes generic http-400 "malformed" error in letsencrypt/boulder,
-			#  so always trying to fetch fresh URL here before sending "agreement" payload.
-			payload, acc_tos = dict(resource='reg'), None
-			res = acc.req(acc.meta['acc.url'], payload)
-			if res.code in [200, 201, 202]: acc_tos = domain_auth_parse_tos_url(res)
-			if not acc_tos:
-				p_err('ERROR: ACME account ToS probe failed')
-				return p_err_for_req(res)
-			payload.update({'terms-of-service-agreed': True, 'agreement': acc_tos})
-			res = acc.req(acc.meta['acc.url'], payload)
-			if res.code not in [200, 201, 202]:
-				p_err('ERROR: ACME account tos agreement update failed')
-				return p_err_for_req(res)
-			log.debug('Account ToS agreement updated, retrying new-authz')
-			res = acc.req('new-authz', payload_domain)
+	ireq = dict(identifier=dict(type='dns', value=domain))
+	res = acc.req('newAuthz', ireq)
 	if res.code != 201:
-		p_err('ERROR: ACME new-authz request failed for domain: {!r}', domain)
+		p_err('ERROR: ACME newAuthz request failed for domain: {!r}', domain)
 		return p_err_for_req(res)
+	res = res.json()
 
-	for ch in res.json()['challenges']:
+	idn = res['identifier']
+	if idn['type'] != ireq['type'] or idn['value'] != ireq['value']:
+		return p_err('ERROR: Spoofed ACME newAuthz response for domain {!r}: {!r}', domain, res)
+
+	for ch in res['challenges']:
 		if ch['type'] == 'http-01': break
 	else:
 		p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
 		return p_err('Challenge-offer JSON:{}', indent_lines(res.body.decode()))
-	token, token_url, auth_url = ch['token'], ch['uri'], res.headers['Location']
+	token, token_url = ch['token'], ch['url']
 	if re.search(r'[^\w\d_\-]', token):
 		return p_err( 'ERROR: Refusing to create path for'
 			' non-alphanum/b64 token value (security issue): {!r}', token )
 	key_authz = '{}.{}'.format(token, acc.key.jwk_thumbprint)
 	p_token = p_acme_dir / token
 	with safe_replacement(p_token, mode=token_mode) as dst: dst.write(key_authz)
+	try:
 
-	acc.hooks.run('domain-auth.publish-challenge', domain, p_token)
-	if query_httpd:
-		url = 'http://{}/.well-known/acme-challenge/{}'.format(domain, token)
-		res = http_req(url)
-		if not (res.code == 200 and res.body.decode() == key_authz):
-			return p_err( 'ERROR: Token-file created in'
-				' -d/--acme-dir is not available at domain URL: {}', url )
+		acc.hooks.run('domain-auth.publish-challenge', domain, p_token)
+		if query_httpd:
+			url = 'http://{}/.well-known/acme-challenge/{}'.format(domain, token)
+			res = http_req(url)
+			if not (res.code == 200 and res.body.decode() == key_authz):
+				return p_err( 'ERROR: Token-file created in'
+					' -d/--acme-dir is not available at domain URL: {}', url )
 
-	res = acc.req( token_url,
-		dict(resource='challenge', type='http-01', keyAuthorization=key_authz) )
-	if res.code not in [200, 202]:
-		p_err('ERROR: http-01 challenge response was not accepted')
-		return p_err_for_req(res)
-
-	for n in range(1, poll_attempts+1):
-		acc.hooks.run('domain-auth.poll-attempt', domain, p_token, n)
-		log.debug('Polling domain-auth [{:02d}]: {!r}', n, domain)
-		res = http_req(token_url)
-		if res.code in [200, 202]:
-			status = res.json()['status']
-			if status == 'invalid':
-				p_err('ERROR: http-01 challenge response was rejected by ACME CA')
-				return p_err_for_req(res)
-			if status == 'valid': break
-		elif res.code != 503:
-			p_err('ERROR: http-01 challenge-status-poll request failed')
+		res = acc.req(token_url, dict())
+		if res.code not in [200, 202]:
+			p_err('ERROR: http-01 challenge response was not accepted')
 			return p_err_for_req(res)
 
-		retry_delay = res.headers.get('Retry-After')
-		if retry_delay:
-			if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
-			else:
-				retry_delay = email.utils.parsedate_to_datetime(retry_delay)
-				if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
-			retry_delay = max(0, retry_delay)
-		retry_delay_acme = retry_delay or '0'
-		if not retry_delay:
-			retry_delay = poll_interval(n) if callable(poll_interval) else poll_interval
-		delay_until = time.monotonic() + max(0, retry_delay)
-		acc.hooks.run('domain-auth.poll-delay', domain, p_token, n, retry_delay_acme)
-		retry_delay = max(0, delay_until - time.monotonic())
-		if retry_delay > 0:
-			log.debug('Polling domain-auth delay [{:02d}]: {:.2f}', n, retry_delay)
-			time.sleep(retry_delay)
-	p_token.unlink()
+		for n in range(1, poll_attempts+1):
+			acc.hooks.run('domain-auth.poll-attempt', domain, p_token, n)
+			log.debug('Polling domain-auth [{:02d}]: {!r}', n, domain)
+			res = http_req(token_url)
+			if res.code not in [200, 202]:
+				p_err('ERROR: http-01 challenge-status-poll request failed')
+				return p_err_for_req(res)
+
+			res = res.json()
+			if res['status'] == 'invalid':
+				p_err('ERROR: http-01 challenge response was rejected by ACME CA')
+				return p_err_for_req(res)
+			if res['status'] == 'valid':
+				idn = res['status']['identifier']
+				if idn['type'] != ireq['type'] or idn['value'] != ireq['value']:
+					return p_err('ERROR: ACME newAuthz mismatch for domain {!r}: {!r}', domain, res)
+				auth_url = res['challenges'][0]['url'] # assuming there'd always be only one
+				break
+			if res['status'] != 'pending':
+				return p_err('ERROR: unknown http-01 challenge status for domain {!r}: {!r}', domain, res)
+
+			retry_delay = res.headers.get('Retry-After')
+			if retry_delay:
+				if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
+				else:
+					retry_delay = email.utils.parsedate_to_datetime(retry_delay)
+					if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
+				retry_delay = max(0, retry_delay)
+			retry_delay_acme = retry_delay or '0'
+			if not retry_delay:
+				retry_delay = poll_interval(n) if callable(poll_interval) else poll_interval
+			delay_until = time.monotonic() + max(0, retry_delay)
+			acc.hooks.run('domain-auth.poll-delay', domain, p_token, n, retry_delay_acme)
+			retry_delay = max(0, delay_until - time.monotonic())
+			if retry_delay > 0:
+				log.debug('Polling domain-auth delay [{:02d}]: {:.2f}', n, retry_delay)
+				time.sleep(retry_delay)
+
+	finally:
+		try: p_token.unlink()
+		except OSError: pass
 
 	acc.meta['auth.domain:{}'.format(domain)] = auth_url
 	acc.meta.save()
@@ -555,7 +561,7 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 		csr_ders[key_type] = csr_der
 
 	for key_type, ci in certs.items():
-		res = acme_bug_retry( acc.req, 'new-cert',
+		res = acme_auth_retry( acc.req, 'new-cert',
 			dict(csr=b64_b2a_jose(csr_ders[key_type])), **acme_retry )
 		if raise_auth_error and res.code == 403:
 			try:
@@ -660,11 +666,12 @@ def main(args=None):
 			ACME directory URL (or shortcut) of Cert Authority (CA) service to interact with.
 			Available shortcuts: le - Let's Encrypt, le-staging - Let's Encrypt staging server.
 			Default: %(default)s''')
-	group.add_argument('--acme-bug-retries',
+	group.add_argument('--acme-auth-retries',
 		metavar='n:timeout', default='5:300', help='''
-			Number of authentication retries with exp-backoff
-				to make within specified timeout for well-known ACME server bugs.
-			Example can be server returning "urn:acme:error:badNonce" randomly.
+			Number of authentication retries with exp-backoff to make within
+				specified timeout for defined ACME protocol quirks like nonce-retries.
+			Specific nonce-retry issue is https://tools.ietf.org/html/rfc8555#section-6.5
+				but any other known bugs and similar things will also use this count/timer.
 			Setting this to 0 or empty value will disable such retry logic. Default: %(default)s''')
 
 	group = parser.add_argument_group('Domain-specific key (-k/--account-key-file) generation',
@@ -690,9 +697,11 @@ def main(args=None):
 				' warnings and notifications to register along with the key.'
 			' If was not specified previously or differs from that, will be automatically updated.')
 	group.add_argument('-o', '--account-key-file-old', metavar='path',
-		help='Issue a key-change command from an old key specified with this option.'
-			' Overrides -r/--register option - if old key is specified, new one'
-				' (specified as -k/--account-key-file) will attached to same account as the old one.')
+		help='''
+			Issue a key-change command from an old key specified with this option.
+			Can be used for importing account keys from other sources.
+			Overrides -r/--register option - if old key is specified, new one
+				(specified as -k/--account-key-file) will attached to same account as the old one.''')
 
 	group = parser.add_argument_group('Hook options')
 	group.add_argument('-x', '--hook', action='append', metavar='hook:path',
@@ -722,7 +731,8 @@ def main(args=None):
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 
-	cmds = parser.add_subparsers(title='Commands', dest='call')
+	cmds = parser.add_subparsers(title='Commands',
+		description='Use -h/--help with these to list command-specific options.', dest='call')
 
 
 	cmd = cmds.add_parser('account-info',
@@ -873,10 +883,12 @@ def main(args=None):
 	if ':' not in acme_url:
 		try: acme_url = acme_ca_shortcuts[acme_url.replace('-', '_')]
 		except KeyError: parser.error('Unkown --acme-service shortcut: {!r}'.format(acme_url))
+	acme_url = ACMEServer(acme_url)
+	acme_url.d = None
 
 	if not opts.account_key_file:
 		parser.error('Path for -k/--account-key-file must be specified.')
-	p_acc_key = pathlib.Path(opts.account_key_file)
+	p_acc_key = pl.Path(opts.account_key_file)
 	if opts.gen_key or (opts.gen_key_if_missing and not p_acc_key.exists()):
 		acc_key = AccKey.generate_to_file(p_acc_key, opts.key_type, file_mode=file_mode)
 		if not acc_key:
@@ -890,21 +902,21 @@ def main(args=None):
 		acc_key.t, acc_key.pk_hash, acc_meta.get('acc.url') )
 
 	acme_retry_opts = dict(retry_n=0, retry_timeout=0)
-	if opts.acme_bug_retries:
-		try: n, timeout = opts.acme_bug_retries.split(':', 1)
-		except ValueError: n, timeout = opts.acme_bug_retries, 300
+	if opts.acme_auth_retries:
+		try: n, timeout = opts.acme_auth_retries.split(':', 1)
+		except ValueError: n, timeout = opts.acme_auth_retries, 300
 		acme_retry_opts.update(retry_n=int(n), retry_timeout=float(timeout))
-	acme_retry_wrap = ft.partial(acme_bug_retry, **acme_retry_opts)
+	acme_retry_wrap = ft.partial(acme_auth_retry, **acme_retry_opts)
 
 
 	### Handle account status
 
 	acc_key_old = opts.account_key_file_old
 	acc_register = opts.register or acc_key_old or not acc_meta.get('acc.url')
-	acc_contact = opts.contact_email and 'mailto:{}'.format(opts.contact_email)
+	acc_contact = opts.contact_email
+	if not acc_contact.startswith('mailto:'): acc_contact = f'mailto:{acc_contact}'
 
-	# 2017-02-03: letsencrypt/boulder uses "agreement", "terms-of-service-agreed" is ignored
-	payload_reg = {'terms-of-service-agreed': True}
+	payload_reg = {'termsOfServiceAgreed': True}
 	if acc_register:
 		if not os.access(p_acc_key, os.W_OK):
 			return p_err( 'ERROR: Account registration required,'
@@ -916,7 +928,7 @@ def main(args=None):
 			if opts.register:
 				log.debug( 'Both -r/--register and'
 					' -o/--account-key-file-old are specified, acting according to latter option.' )
-			p_acc_key_old = pathlib.Path(acc_key_old)
+			p_acc_key_old = pl.Path(acc_key_old)
 			acc_key_old = AccKey.load_from_file(p_acc_key_old)
 			if not acc_key_old:
 				parser.error('Unknown/unsupported key type'
@@ -925,37 +937,34 @@ def main(args=None):
 			acc_url_old = acc_meta_old.get('acc.url')
 			if not acc_url_old:
 				log.debug( 'Old key file (-o/--account-key-file-old) does'
-					' not have registration URL, will be fetched via new-reg request' )
+					' not have registration URL, will be fetched via newAccount request' )
 				res = acme_retry_wrap( signed_req,
-					acc_key_old, 'new-reg', payload_reg, acme_url=acme_url )
-				if res.code not in [201, 409]:
+					acc_key_old, 'newAccount', payload_reg, acme_url=acme_url )
+				if res.code not in [200, 201, 409]:
 					p_err('ERROR: ACME new-reg'
 						' request for old key (-o/--account-key-file-old) failed')
 					return p_err_for_req(res)
 				acc_url_old = res.headers['Location']
 
-		if not acc_key_old: # new-reg
+		if not acc_key_old: # newAccount
 			if acc_contact: payload_reg['contact'] = [acc_contact]
 			res = acme_retry_wrap( signed_req,
-				acc_key, 'new-reg', payload_reg, acme_url=acme_url )
+				acc_key, 'newAccount', payload_reg, acme_url=acme_url )
 			if res.code not in [201, 409]:
-				p_err('ERROR: ACME new-reg (key registration) request failed')
+				p_err('ERROR: ACME newAccount (key registration) request failed')
 				return p_err_for_req(res)
 			log.debug('Account registration status: {} {}', res.code, res.reason)
 			acc_meta['acc.url'] = res.headers['Location']
 			if res.code == 201: acc_meta['acc.contact'] = acc_contact
-		else: # key-change
-			with urlopen(acme_url) as r: # need same URL for both inner and outer payloads
+		else: # keyChange
+			with urlopen(acme_url) as r: # need same-url for both inner and outer payloads
 				assert r.getcode() == 200
-				resource, acme_dir = 'key-change', json.load(r)
-				url, nonce = acme_dir[resource], r.headers['Replay-Nonce']
-			payload = dict(account=acc_url_old, newKey=acc_key.jwk)
-			payload = signed_req_body(acc_key, payload, url=url, encode=False)
-			# According to https://tools.ietf.org/html/draft-ietf-acme-acme-04#section-5.2 ,
-			#  only new-reg and revoke-cert should have jwk instead of kid,
-			#  but 6.3.2 explicitly mentions jwks, so guess it should also be exception here.
-			res = acme_retry_wrap( signed_req,
-				acc_key_old, url, payload, nonce=nonce, resource=resource )
+				acme_url.d = adict(json.load(r))
+			payload = dict(account=acc_url_old, oldKey=acc_key_old.jwk)
+			payload = signed_req_body( # "inner" JWS with jwk and no nonce
+				acc_key, payload, url=acme_url.d.keyChange, encode=False )
+			res = acme_retry_wrap( signed_req, acc_key_old,
+				acme_url.d.keyChange, payload, kid=acc_url_old, acme_url=acme_url )
 			if res.code not in [200, 201, 202]:
 				p_err('ERROR: ACME account key-change request failed')
 				return p_err_for_req(res)
@@ -966,10 +975,8 @@ def main(args=None):
 
 	if acc_contact and acc_contact != acc_meta.get('acc.contact'):
 		log.debug('Updating account contact information')
-		res = acme_retry_wrap( signed_req,
-			acc_key, acc_meta['acc.url'],
-			dict(resource='reg', contact=[acc_contact]),
-			kid=acc_meta['acc.url'], acme_url=acme_url )
+		res = acme_retry_wrap( signed_req, acc_key, acc_meta['acc.url'],
+			dict(contact=[acc_contact]), kid=acc_meta['acc.url'], acme_url=acme_url )
 		if res.code not in [200, 201, 202]:
 			p_err('ERROR: ACME account contact info update request failed')
 			return p_err_for_req(res)
@@ -986,7 +993,7 @@ def main(args=None):
 	### Handle commands
 
 	if opts.call == 'account-info':
-		res = acme_retry_wrap(acc.req, acc.meta['acc.url'], dict(resource='reg'))
+		res = acme_retry_wrap(acc.req, acc.meta['acc.url'])
 		if res.code not in [200, 201, 202]:
 			p_err('ERROR: ACME account info request failed')
 			return p_err_for_req(res)
@@ -994,7 +1001,7 @@ def main(args=None):
 
 	elif opts.call == 'account-deactivate':
 		res = acme_retry_wrap( acc.req,
-			acc.meta['acc.url'], dict(resource='reg', status='deactivated') )
+			acc.meta['acc.url'], dict(status='deactivated') )
 		if res.code != 200:
 			p_err('ERROR: ACME account deactivation request failed')
 			return p_err_for_req(res)
@@ -1028,7 +1035,7 @@ def main(args=None):
 
 	elif opts.call == 'cert-issue':
 		key_type_list = opts.cert_key_type or ['ec-384']
-		p_cert_base = pathlib.Path(opts.file_prefix)
+		p_cert_base = pl.Path(opts.file_prefix)
 		p_cert_dir, p_cert_base = p_cert_base.parent, p_cert_base.name
 		cert_domain_list = [opts.domain] + (opts.altname or list())
 		cert_name_attrs = list()

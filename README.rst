@@ -26,7 +26,7 @@ Main features
 
 - Does not do anything with httpd or any other daemons and their configuration.
 
-- Uses "ACME v1" protocol supported by Let's Encrypt at the moment.
+- Uses "ACME v2" protocol supported by Let's Encrypt since after April 2018.
 
 Can generate/use/roll-over account keys (ec-384/rsa-2048/rsa-4096,
 pem pkcs8 or openssl/pkcs1), register/query/deactivate accounts,
@@ -118,10 +118,8 @@ Links
   Original public Certificate Authority, issuing certificates for websites via
   ACME protocol to anyone at no cost.
 
-  Only supports non-IETF v1 version of ACME protocol, as of 2017, but should
-  also support IETF standardized version starting from Jan 2018
-  (`2017-06-14 announcement link
-  <https://letsencrypt.org/2017/06/14/acme-v2-api.html>`_).
+  Supports IETF v2 version of ACME protocol, as described in
+  `RFC 8555 <https://tools.ietf.org/html/rfc8555>`_.
 
 - `Let's Encrypt "Chain of Trust" page <https://letsencrypt.org/certificates/>`_
 
@@ -159,3 +157,18 @@ Links
 
   - `Qualys SSL Labs <https://github.com/ssllabs/research/wiki/SSL-and-TLS-Deployment-Best-Practices>`_
   - `Mozilla <https://wiki.mozilla.org/Security/Server_Side_TLS>`_
+
+- EdDSA (ed25519) support links:
+
+  - `Not supported for ACME account keys yet
+    <https://github.com/letsencrypt/boulder/issues/4213>`_
+
+  - Not supported and/or standardized properly in browsers yet
+
+    - `community.letsencrypt.org thread #69868
+      <https://community.letsencrypt.org/t/support-ed25519-and-ed448/69868>`_
+
+    - `github letsencrypt/boulder issue #3649
+      <https://github.com/letsencrypt/boulder/issues/3649>`_
+
+   State as of 2019-10-05, please open an issue if you notice that it's outdated.
