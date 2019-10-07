@@ -3,7 +3,7 @@
 ================
 
 Simple one-stop tool to manage X.509/TLS certs and all the ACME CA
-authorization stuff.
+authorization stuff with minimum dependencies.
 
 .. contents::
   :backlinks: none
@@ -13,8 +13,10 @@ Main features
 -------------
 
 - P-384 (secp384r1) ECC keys and certs are supported and the default,
-  with RSA only being supported as a fallback option where still necessary
+  with RSA also supported as a fallback option where still necessary
   (e.g. certs for old clients that can't do ECC).
+
+- Can issue multiple certificate for diff key types in one command.
 
 - Single python3 script implementation,
   only dependent on `cryptography.io <https://cryptography.io/>`_ module.
@@ -30,9 +32,8 @@ Main features
 
 Can generate/use/roll-over account keys (ec-384/rsa-2048/rsa-4096,
 pem pkcs8 or openssl/pkcs1), register/query/deactivate accounts,
-authorize/deauthorize domains (via http-01 challenge), generate configurable
-X.509 CSRs (ec-384/rsa-2048/rsa-4096 keys, pem openssl/pkcs1 for certs and keys),
-sign these through ACME CA.
+generate configurable X.509 CSRs (ec-384/rsa-2048/rsa-4096 keys, pem
+openssl/pkcs1 for certs and keys), sign these through ACME CA.
 
 Hook scripts can be used at multiple points to integrate script into whatever
 setup (e.g. sync challenge files, reload httpd, process keys, introduce delays, etc),
@@ -45,11 +46,12 @@ Usage example
 ::
 
   % ./acme-cert-tool.py --debug -gk le-staging.acc cert-issue \
-      -d /srv/www/.well-known/acme-challenge le-staging.cert.pem mydomain.com
+     le-staging.cert.pem /srv/www/.well-known/acme-challenge mydomain.com
 
 EC P-384 (default) account key (along with some metadata, as comments) will be
 stored in "le-staging.acc" file (note: account key has nothing to do with
-certificate), certificate and its key (also P-384 by default) in "le-staging.cert.pem".
+certificate), certificate (chain) and its key (also P-384 by default) in
+"le-staging.cert.pem" file.
 
 Can be re-run to generate new certificate there (i.e. renew) with the same
 account key and domain authorization (-g/--gen-key-if-missing does not regen key files).
@@ -58,9 +60,7 @@ To use non-staging server with "legit" intermediate
 (be sure to check ToS and limits first!), simply add "-s le" there.
 
 When configuring Web Server after that, it should use resulting \*.pem
-as both certificate and key (see also -s/--split-key-file option),
-and should also probably include any intermediate certificates necessary
-from `Let's Encrypt "Chain of Trust" page`_ (can be bundled into .pem via hook).
+as both certificate chain and key (see also -s/--split-key-file option).
 
 Run ``./acme-cert-tool.py -h`` to get more information on all supported commands
 and options, and e.g. ``./acme-cert-tool.py cert-issue -h`` to see info and options
@@ -88,6 +88,9 @@ options and ACLs (``setfacl -m d:...``) to share files between different uids/gi
 
 Bugs and Vulnerabilities
 ------------------------
+
+Ones that I'm aware of wrt either ACME protocol or this specific implementation
+are listed here, let me know if there are any other relevant problems.
 
 - `Critical vulnerability in JSON Web Encryption (2017-03-13)
   <http://blog.intothesymmetry.com/2017/03/critical-vulnerability-in-json-web.html>`_
@@ -121,10 +124,12 @@ Links
   Supports IETF v2 version of ACME protocol, as described in
   `RFC 8555 <https://tools.ietf.org/html/rfc8555>`_.
 
+- `RFC 8555 describing ACME protocol <https://tools.ietf.org/html/rfc8555>`_
+
 - `Let's Encrypt "Chain of Trust" page <https://letsencrypt.org/certificates/>`_
 
-  Links to intermediate certificates that can be required for validation in some apps,
-  though browsers usually include these already.
+  Links to LE root and intermediate certificates, which should be supplied in
+  resulting PEM files already, and usually shipped in browsers too.
 
 - `ACME client list <https://letsencrypt.org/docs/client-options/>`_
 
@@ -134,10 +139,6 @@ Links
 
   Official Let's Encrypt client, has a lot of options and plugins to e.g. mess
   with httpd configuration files, fairly heavyweight.
-
-- `IETF ACME protocol docs <https://datatracker.ietf.org/wg/acme/documents/>`_
-
-  Not supported by Let's Encrypt yet (2017).
 
 - `acme-tiny <https://github.com/diafygi/acme-tiny>`_
 
@@ -158,7 +159,7 @@ Links
   - `Qualys SSL Labs <https://github.com/ssllabs/research/wiki/SSL-and-TLS-Deployment-Best-Practices>`_
   - `Mozilla <https://wiki.mozilla.org/Security/Server_Side_TLS>`_
 
-- EdDSA (ed25519) support links:
+- EdDSA (ed25519) support info:
 
   - `Not supported for ACME account keys yet
     <https://github.com/letsencrypt/boulder/issues/4213>`_
@@ -171,4 +172,5 @@ Links
     - `github letsencrypt/boulder issue #3649
       <https://github.com/letsencrypt/boulder/issues/3649>`_
 
-   State as of 2019-10-05, please open an issue if you notice that it's outdated.
+Last updated on 2019-10-07,
+please open an issue if you notice any outdated info/links.

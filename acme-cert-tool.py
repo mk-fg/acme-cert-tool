@@ -66,8 +66,9 @@ def p(*a, file=None, end='\n', flush=False, **k):
 			else ([fmt] + list(a), k) )
 	print(*a, file=file, end=end, flush=flush, **k)
 
-indent_lines = lambda text,indent='  ',prefix='\n': ( (prefix if text else '') +
-	''.join('{}{}'.format(indent, line) for line in text.splitlines(keepends=True)) )
+indent_lines = lambda text,indent='  ',prefix='\n': (
+	(prefix if text else '') +
+		''.join(f'{indent}{line}' for line in text.splitlines(keepends=True)) )
 
 p_err = lambda *a,**k: p(*a, file=sys.stderr, **k) or 1
 
@@ -97,7 +98,7 @@ def p_err_for_req(res, final=False):
 	return p_err(
 		'Server response: {} {}\nHeaders: {}Body: {}',
 		res.code or '-', res.reason or '-',
-		indent_lines(''.join( '{}: {}\n'.format(k, v)
+		indent_lines(''.join( f'{k}: {v}\n'
 			for k, v in (res.headers.items() if res.headers else list()) )),
 		indent_lines((res.body or b'').decode()) )
 
@@ -113,7 +114,7 @@ def b64_b2a_jose(data, uint_len=None):
 	# https://tools.ietf.org/html/draft-ietf-jose-json-web-signature-37#appendix-C
 	if uint_len is not None:
 		data = data.to_bytes(uint_len, 'big', signed=False)
-		# print(':'.join('{:02x}'.format(b) for b in data))
+		# print(':'.join(f'{b:02x}' for b in data))
 	if isinstance(data, str): data = data.encode()
 	return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
 
@@ -150,7 +151,7 @@ class AccKey:
 		else: raise ValueError(self.t)
 		digest = hashes.Hash(hashes.SHA256(), crypto_backend)
 		digest.update(json.dumps(jwk, sort_keys=True, separators=(',', ':')).encode())
-		log.debug('Key JWK: {}', jwk) # XXX: debug
+		# log.debug('Key JWK: {}', jwk)
 		return jwk, b64_b2a_jose(digest.finalize())
 
 	def _pk_hash(self, trunc_len=8):
@@ -204,7 +205,7 @@ class AccKey:
 			p_acc_key.read_bytes(), None, crypto_backend )
 		if isinstance(acc_key, rsa.RSAPrivateKey):
 			assert acc_key.key_size in [2048, 4096]
-			acc_key_t = 'rsa-{}'.format(acc_key.key_size)
+			acc_key_t = f'rsa-{acc_key.key_size}'
 		elif isinstance(acc_key, ec.EllipticCurvePrivateKey)\
 			and acc_key.curve.name == 'secp384r1': acc_key_t = 'ec-384'
 		else: return None
@@ -242,7 +243,7 @@ class AccMeta(dict):
 			if not final_newline: dst.write('\n')
 			for k, v in self.items():
 				if v is None: continue
-				dst.write('## acme.{}: {}\n'.format(k, json.dumps(v)))
+				dst.write(f'## acme.{k}: {json.dumps(v)}\n')
 
 
 class ACMEServer(str): __slots__ = 'd', # /directory cache
@@ -276,8 +277,6 @@ def http_req(url, data=None, headers=None, **req_kws):
 	return res
 
 def signed_req_body(acc_key, payload, nonce=None, kid=None, url=None, encode=True):
-	# For all of the boulder-specific quirks implemented here, see:
-	#  letsencrypt/boulder/blob/d26a54b/docs/acme-divergences.md
 	protected = dict(alg=acc_key.jws_alg, url=url)
 	if not kid: protected['jwk'] = acc_key.jwk
 	else: protected['kid'] = kid
@@ -292,12 +291,12 @@ def signed_req_body(acc_key, payload, nonce=None, kid=None, url=None, encode=Tru
 		if not isinstance(payload, bytes): payload = json.dumps(payload)
 		payload = b64_b2a_jose(payload)
 	signature = b64_b2a_jose(
-		acc_key.sign_func('{}.{}'.format(protected, payload).encode()) )
+		acc_key.sign_func(f'{protected}.{payload}'.encode()) )
 	body = dict(protected=protected, payload=payload, signature=signature)
 	if encode: body = json.dumps(body).encode()
 	return body
 
-def signed_req(acc_key, url, payload=None, kid=None, nonce=None, acme_url=None):
+def signed_req(acc_key, url, payload='', kid=None, nonce=None, acme_url=None):
 	url_full = url if ':' in url else None
 	if not url_full or not nonce:
 		assert acme_url, [url, acme_url] # need to query directory
@@ -316,8 +315,8 @@ def signed_req(acc_key, url, payload=None, kid=None, nonce=None, acme_url=None):
 				nonce = r.headers['Replay-Nonce']
 	body = signed_req_body(acc_key, payload, kid=kid, nonce=nonce, url=url_full)
 	log.debug('Sending signed http request to URL: {!r} ...', url_full)
-	log.debug('Signed request body: {}', indent_lines( # XXX: debug
-		json.dumps(json.loads(body), sort_keys=True, indent=2) ))
+	# log.debug('Signed request body: {}', indent_lines(
+	# 	json.dumps(json.loads(body), sort_keys=True, indent=2) ))
 	res = http_req(url_full, body)
 	log.debug('... http response: {} {}', res.code or '-', res.reason or '?')
 	return res
@@ -325,34 +324,38 @@ def signed_req(acc_key, url, payload=None, kid=None, nonce=None, acme_url=None):
 
 class AccHooks(dict):
 	points = {
-		'domain-auth.start-all':
+		'auth.start-all':
 			'Before starting authorization process for domain(s), once per script run.\n'
-			'args: all domains to be authorized, in the same order.',
-		'domain-auth.start':
-			'Before authorization of each individual domain.'
+			'args: all domains to be checked/authorized, in the same order.',
+		'auth.start':
+			'Before authorization of each individual domain.\n'
 			'args: domain to be authorized.',
-		'domain-auth.publish-challenge':
+		'auth.publish-challenge':
 			'After http-01 challenge-file has been stored in acme-dir and before\n'
 				' checking local httpd for it (if not disabled) or notifying CA about it.\n'
 			'args: domain to be authorized, challenge-file path.',
-		'domain-auth.poll-attempt':
+		'auth.poll-attempt':
 			'After notifying ACME CA about http-01 challenge completion\n'
 				' and before each attempt to check domain authorization results.\n'
 			'args: authorized domain, challenge-file path, number of poll-attempt (1, 2, 3, ...).',
-		'domain-auth.poll-delay':
-			'After each check for domain authorization result, if it is not available yet.\n'
+		'auth.poll-delay':
+			'After each check for domain authorization status, if it is not available yet.\n'
 			'args: authorized domain, challenge-file path, number of poll-attempt (1, 2, 3, ...),\n'
 				'      delay as specified by ACME server in Retry-After header or "0" if none.',
-		'domain-auth.done':
+		'auth.done':
 			'After authorization of each individual domain.\n'
 			'args: domain that was authorized.',
-		'domain-auth.done-all':
+		'auth.done-all':
 			'After authorization process for domain(s), once per script run.\n'
-			'args: all domains that were authorized, in the same order.',
+			'args: all domains that were checked/authorized, in the same order.',
 		'cert.csr-check':
 			'Before submitting any of Cert Signing Requests (CSR) to ACME CA for signing.\n'
 			'args: key type (e.g. ec-384, rsa-2048, etc), cert domain(s).\n'
 			'stdin: DER-encoded CSR, exactly same as will be submitted to CA.',
+		'cert.poll-delay':
+			'After each check for cert signing status, if it is not available yet.\n'
+			'args: number of poll-attempt (1, 2, 3, ...), delay from ACME server\n'
+				'      (as per Retry-After header) or "0" if none, cert domain(s).',
 		'cert.issued':
 			'After signing (all) CSR(s) (one per key type, if >1)\n'
 				' with the server, but before storing any of certs/keys on fs.\n'
@@ -382,17 +385,16 @@ class AccSetup:
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
 class X509CertInfo:
-	__slots__ = 'key csr cert_str'.split()
+	__slots__ = 'key_type key csr cert_str'.split()
 	def __init__(self, *args, **kws):
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
 
 class ACMEError(Exception): pass
-class ACMEDomainAuthError(ACMEError): pass
-
 class ACMEAuthRetry(Exception): pass
 
 def acme_auth_retry(func, *args, retry_n=0, retry_timeout=0, **kws):
+	'Wrapper to retry requests for bad nonces or any known server issues.'
 	delays = ( retries_within_timeout(retry_n, retry_timeout)
 		if (retry_n or 0) > 0 and (retry_timeout or 0) > 0 else list() )
 	kws_for_attempt = dict()
@@ -412,130 +414,28 @@ def acme_auth_retry(func, *args, retry_n=0, retry_timeout=0, **kws):
 		if delay: time.sleep(delay)
 	return p_err_for_req(err_res, final=True)
 
-def domain_auth_filter(acc, domains):
-	for domain in domains:
-		if 'auth.domain:{}'.format(domain) in acc.meta:
-			log.debug('Skipping pre-authorized domain: {!r}', domain)
-			continue
-		yield domain
-
-def cmd_domain_auth_batch( acc, domains,
-		opt_acme_dir, opt_challenge_file_mode, opt_poll_params,
-		auth_log=None, force=False, query_httpd=True, acme_retry=dict() ):
-	'Wrapper around multiple domain authorizations to run hooks and do common init stuff.'
-	p_acme_dir = pl.Path(opt_acme_dir)
-	p_acme_dir.mkdir(parents=True, exist_ok=True)
-	token_mode = int(opt_challenge_file_mode, 8) & 0o777
-	if not force: domains = list(domain_auth_filter(acc, domains))
-	if opt_poll_params:
-		delay, attempts = opt_poll_params.split(':', 1)
-		poll_opts = dict(poll_interval=float(delay), poll_attempts=int(attempts))
-	else: poll_opts = dict()
-	acc.hooks.run('domain-auth.start-all', *domains)
-	for domain in domains:
-		log.debug('Authorizing access to domain: {!r}', domain)
-		acc.hooks.run('domain-auth.start', domain)
-		err = acme_auth_retry( cmd_domain_auth, acc, p_acme_dir, domain,
-			token_mode=token_mode, query_httpd=query_httpd, **poll_opts, **acme_retry )
-		if err: return err
-		acc.hooks.run('domain-auth.done', domain)
-		(auth_log or log.debug)('Authorized access to domain: {!r}', domain)
-	acc.hooks.run('domain-auth.done-all', domains)
-
-def cmd_domain_auth( acc, p_acme_dir, domain,
-		token_mode=0o600, query_httpd=True,
-		poll_interval=lambda n: min(60, (2**n - 1) / 5), poll_attempts=15 ):
-	ireq = dict(identifier=dict(type='dns', value=domain))
-	res = acc.req('newAuthz', ireq)
-	if res.code != 201:
-		p_err('ERROR: ACME newAuthz request failed for domain: {!r}', domain)
-		return p_err_for_req(res)
-	res = res.json()
-
-	idn = res['identifier']
-	if idn['type'] != ireq['type'] or idn['value'] != ireq['value']:
-		return p_err('ERROR: Spoofed ACME newAuthz response for domain {!r}: {!r}', domain, res)
-
-	for ch in res['challenges']:
-		if ch['type'] == 'http-01': break
-	else:
-		p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
-		return p_err('Challenge-offer JSON:{}', indent_lines(res.body.decode()))
-	token, token_url = ch['token'], ch['url']
-	if re.search(r'[^\w\d_\-]', token):
-		return p_err( 'ERROR: Refusing to create path for'
-			' non-alphanum/b64 token value (security issue): {!r}', token )
-	key_authz = '{}.{}'.format(token, acc.key.jwk_thumbprint)
-	p_token = p_acme_dir / token
-	with safe_replacement(p_token, mode=token_mode) as dst: dst.write(key_authz)
-	try:
-
-		acc.hooks.run('domain-auth.publish-challenge', domain, p_token)
-		if query_httpd:
-			url = 'http://{}/.well-known/acme-challenge/{}'.format(domain, token)
-			res = http_req(url)
-			if not (res.code == 200 and res.body.decode() == key_authz):
-				return p_err( 'ERROR: Token-file created in'
-					' -d/--acme-dir is not available at domain URL: {}', url )
-
-		res = acc.req(token_url, dict())
-		if res.code not in [200, 202]:
-			p_err('ERROR: http-01 challenge response was not accepted')
-			return p_err_for_req(res)
-
-		for n in range(1, poll_attempts+1):
-			acc.hooks.run('domain-auth.poll-attempt', domain, p_token, n)
-			log.debug('Polling domain-auth [{:02d}]: {!r}', n, domain)
-			res = http_req(token_url)
-			if res.code not in [200, 202]:
-				p_err('ERROR: http-01 challenge-status-poll request failed')
-				return p_err_for_req(res)
-
-			res = res.json()
-			if res['status'] == 'invalid':
-				p_err('ERROR: http-01 challenge response was rejected by ACME CA')
-				return p_err_for_req(res)
-			if res['status'] == 'valid':
-				idn = res['status']['identifier']
-				if idn['type'] != ireq['type'] or idn['value'] != ireq['value']:
-					return p_err('ERROR: ACME newAuthz mismatch for domain {!r}: {!r}', domain, res)
-				auth_url = res['challenges'][0]['url'] # assuming there'd always be only one
-				break
-			if res['status'] != 'pending':
-				return p_err('ERROR: unknown http-01 challenge status for domain {!r}: {!r}', domain, res)
-
-			retry_delay = res.headers.get('Retry-After')
-			if retry_delay:
-				if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
-				else:
-					retry_delay = email.utils.parsedate_to_datetime(retry_delay)
-					if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
-				retry_delay = max(0, retry_delay)
-			retry_delay_acme = retry_delay or '0'
-			if not retry_delay:
-				retry_delay = poll_interval(n) if callable(poll_interval) else poll_interval
-			delay_until = time.monotonic() + max(0, retry_delay)
-			acc.hooks.run('domain-auth.poll-delay', domain, p_token, n, retry_delay_acme)
-			retry_delay = max(0, delay_until - time.monotonic())
-			if retry_delay > 0:
-				log.debug('Polling domain-auth delay [{:02d}]: {:.2f}', n, retry_delay)
-				time.sleep(retry_delay)
-
-	finally:
-		try: p_token.unlink()
-		except OSError: pass
-
-	acc.meta['auth.domain:{}'.format(domain)] = auth_url
-	acc.meta.save()
+def acme_auth_poll_delay(n, poll_interval, retry_delay=None, delay_hook=None):
+	'Sleep according to Retry-After response header value (retry_delay) or poll_interval.'
+	if retry_delay:
+		if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
+		else:
+			retry_delay = email.utils.parsedate_to_datetime(retry_delay)
+			if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
+		retry_delay = max(0, retry_delay)
+	retry_delay_acme = retry_delay or '0'
+	if not retry_delay:
+		retry_delay = poll_interval(n) if callable(poll_interval) else poll_interval
+	delay_until = time.monotonic() + max(0, retry_delay)
+	if delay_hook: delay_hook(retry_delay_acme)
+	retry_delay = max(0, delay_until - time.monotonic())
+	if retry_delay > 0:
+		log.debug('Polling auth delay [{:02d}]: {:.2f}', n, retry_delay)
+		time.sleep(retry_delay)
 
 
-def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
-		key_type_list, cert_domain_list, cert_name_attrs,
-		file_mode=0o600, split_key_file=False,
-		remove_files_for_prefix=False, raise_auth_error=False, acme_retry=dict() ):
-	from cryptography import x509
-	from cryptography.x509.oid import NameOID
-
+def cert_gen(key_type_list, cert_domain_list, cert_name_attrs):
+	'Generate list of X509CertInfo objects with keys and CSRs for specified key types.'
+	x509, NameOID = cryptography.x509, cryptography.x509.oid.NameOID
 	csr = x509.CertificateSigningRequestBuilder()
 	csr_name = list()
 	for k, v in cert_name_attrs:
@@ -546,46 +446,178 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 	csr = csr.add_extension(x509.SubjectAlternativeName(
 		list(map(x509.DNSName, cert_domain_list)) ), critical=False)
 
-	certs = dict((k, X509CertInfo()) for k in key_type_list)
-	for key_type, ci in certs.items():
+	certs = list()
+	for key_type in key_type_list:
+		ci = X509CertInfo(key_type=key_type)
 		log.debug('Generating {} key for certificate...', key_type)
 		ci.key = generate_crypto_key(key_type)
 		if not ci.key:
-			parser.error('Unknown/unsupported --cert-key-type value: {!r}'.format(key_type))
+			raise ACMEError('Unknown/unsupported --cert-key-type value: {key_type!r}')
 		ci.csr = csr.sign(ci.key, hashes.SHA256(), crypto_backend)
+		certs.append(ci)
+	return certs
 
-	csr_ders = dict()
-	for key_type, ci in certs.items():
-		csr_der = ci.csr.public_bytes(serialization.Encoding.DER)
-		acc.hooks.run('cert.csr-check', key_type, *cert_domain_list, stdin=csr_der)
-		csr_ders[key_type] = csr_der
 
-	for key_type, ci in certs.items():
-		res = acme_auth_retry( acc.req, 'new-cert',
-			dict(csr=b64_b2a_jose(csr_ders[key_type])), **acme_retry )
-		if raise_auth_error and res.code == 403:
-			try:
-				err_body = res.json()
-				err_id, err_msg = err_body['type'], err_body.get('detail', '[no details]')
-			except Exception: pass # any other kind of response
-			else:
-				if err_id == 'urn:acme:error:unauthorized':
-					raise ACMEDomainAuthError(err_id, err_msg) from None
-		if res.code != 201:
-			p_err('ERROR: Failed to get signed cert from ACME CA')
+def domain_auth( acc, domain_set, auth_url,
+		p_acme_dir, token_mode=0o644, poll=None, query_httpd=True ):
+	'Complete http-01 challenge authorization sequence for domain.'
+	res = acc.req(auth_url, '')
+	if res.code != 200:
+		p_err('ERROR: Auth info request failed: {}', auth_url)
+		return p_err_for_req(res)
+	domain = res.json()['identifier']['value']
+	if domain not in domain_set:
+		p_err('ERROR: Auth-URL domain {!r} not in requested set: {!r}', domain, domain_set)
+		return p_err_for_req(res)
+	res = res.json()
+	if res['status'] == 'valid':
+		log.debug('Pre-authorized access to domain: {!r}', domain)
+		return
+
+	log.debug('Authorizing access to domain: {!r}', domain)
+	acc.hooks.run('auth.start', domain)
+
+	for ch in res['challenges']:
+		if ch['type'] == 'http-01': break
+	else:
+		p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
+		return p_err('Challenge-offer JSON:{}', indent_lines(res.body.decode()))
+	token, token_url = ch['token'], ch['url']
+	if re.search(r'[^\w\d_\-]', token):
+		return p_err( 'ERROR: Refusing to create path for'
+			' non-alphanum/b64 token value (security issue): {!r}', token )
+	key_authz = f'{token}.{acc.key.jwk_thumbprint}'
+	p_token = p_acme_dir / token
+	with safe_replacement(p_token, mode=token_mode) as dst: dst.write(key_authz)
+	try:
+
+		acc.hooks.run('auth.publish-challenge', domain, p_token)
+		if query_httpd:
+			url = f'http://{domain}/.well-known/acme-challenge/{token}'
+			res = http_req(url)
+			if not (res.code == 200 and res.body.decode() == key_authz):
+				return p_err( 'ERROR: Token-file created in'
+					' -d/--acme-dir is not available at domain URL: {}', url )
+
+		res = acc.req(token_url, dict())
+		if res.code not in [200, 202]:
+			p_err('ERROR: http-01 challenge response was not accepted')
 			return p_err_for_req(res)
-		ci.cert_str = '-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n'\
-			.format('\n'.join(textwrap.wrap(base64.b64encode(res.body).decode(), 64)))
-		log.debug('Signed {} certificate', key_type)
+
+		for n in range(1, poll.attempts+1):
+			acc.hooks.run('auth.poll-attempt', domain, p_token, n)
+			log.debug('Polling auth [{:02d}]: {!r}', n, domain)
+			res = http_req(token_url)
+			if res.code not in [200, 202]:
+				p_err('ERROR: http-01 challenge-status-poll request failed')
+				return p_err_for_req(res)
+
+			res, retry_delay = res.json(), res.headers.get('Retry-After')
+			if res['status'] == 'invalid':
+				p_err('ERROR: http-01 challenge response was rejected by ACME CA')
+				return p_err_for_req(res)
+			if res['status'] == 'valid':
+				try:
+					idn = res.get('identifier')
+					if idn is not None:
+						if idn['type'] != 'dns' or idn['value'] != domain: raise KeyError
+					else: # 2019-10-07 - LE returns non-RFC validationRecord list, use that
+						for vr in res['validationRecord']:
+							if vr['hostname'] == domain: break
+						else: raise KeyError
+				except:
+					return p_err('ERROR: Auth ID mismatch for domain {!r}: {!r}', domain, res)
+				break
+			if res['status'] not in ['pending', 'processing']:
+				return p_err('ERROR: unknown http-01 challenge status for domain {!r}: {!r}', domain, res)
+
+			acme_auth_poll_delay( n, poll.interval, retry_delay,
+				ft.partial(acc.hooks.run, 'auth.poll-delay', domain, p_token, n) )
+
+	finally:
+		try: p_token.unlink()
+		except OSError: pass
+
+	acc.hooks.run('auth.done', domain)
+	log.debug('Authorized access to domain: {!r}', domain)
+
+
+def cert_issue(acc, ci, cert_domain_list, auth_opts, acme_retry=dict()):
+	'Return signed-pem-certificate-chain str for X509CertInfo object (CSR).'
+	acme_retry_wrap = ft.partial(acme_auth_retry, **acme_retry)
+	csr_der = ci.csr.public_bytes(serialization.Encoding.DER)
+	acc.hooks.run('cert.csr-check', ci.key_type, *cert_domain_list, stdin=csr_der)
+
+	# 2019-10-07 - passing any non-empty notBefore/notAfter is not supported:
+	#  https://github.com/letsencrypt/boulder/blob/a3c3f521/wfe2/wfe.go#L1936-L1958
+	res = acme_retry_wrap( acc.req, 'newOrder',
+		dict(identifiers=list(dict(type='dns', value=d) for d in cert_domain_list)) )
+	if res.code != 201:
+		p_err('ERROR: ACME newOrder request failed for domains: {!r}', cert_domain_list)
+		return p_err_for_req(res)
+	res = res.json()
+	auth_domains = list(d['value'] for d in res['identifiers'] if d['type'] == 'dns')
+	if set(auth_domains).difference(cert_domain_list):
+		return p_err( 'ERROR: ACME newOrder response'
+			' identifiers list mismatch {!r}: {!r}', cert_domain_list, res )
+	auth_url_final = res['finalize']
+
+	acc.hooks.run('auth.start-all', *auth_domains)
+	for auth_url in res['authorizations']:
+		err = acme_retry_wrap( domain_auth, acc,
+			set(auth_domains), auth_url, **auth_opts )
+		if err: return err
+	acc.hooks.run('auth.done-all', *auth_domains)
+
+	log.debug('Submitting CSR({}) for signing', ci.key_type)
+	res = acme_retry_wrap( acc.req,
+		auth_url_final, dict(csr=b64_b2a_jose(csr_der)) )
+	if res.code != 200:
+		p_err('ERROR: Failed to finalize ACME challenge')
+		return p_err_for_req(res)
+	res = res.json()
+
+	if res['status'] == 'processing':
+		for n in range(1, auth_opts.poll.attempts+1):
+			acme_auth_poll_delay(
+				n, auth_opts.poll.interval, res.headers.get('Retry-After'),
+				lambda d: acc.hooks.run('cert.poll-delay', n, d, *cert_domain_list) )
+			log.debug('Checking cert({}) signing status [{:02d}]', ci.key_type, n)
+			res = acme_retry_wrap(acc.req, auth_url_final)
+			if res.code not in 200:
+				p_err('ERROR: signing-status-poll request failed')
+				return p_err_for_req(res)
+			res = res.json()
+			if res['status'] != 'processing': break
+
+	if res['status'] != 'valid':
+		p_err('ERROR: Error response to challenge finalize request')
+		return p_err_for_req(res)
+
+	res = acme_retry_wrap(acc.req, res['certificate'])
+	if res.code != 200 or res.headers.get('Content-Type') != 'application/pem-certificate-chain':
+		p_err('ERROR: Failed to download pem certificate chain')
+		return p_err_for_req(res)
+	return res.body.decode().strip() + '\n' # pem cert chain
+
+
+def cmd_cert_issue(
+		acc, p_cert_dir, p_cert_base, key_type_list, cert_domain_list, cert_name_attrs,
+		split_key_file=False, file_mode=0o600, remove_files_for_prefix=False, **issue_kws ):
+
+	certs = cert_gen(key_type_list, cert_domain_list, cert_name_attrs)
+	for n, ci in enumerate(certs, 1):
+		ci.cert_str = cert_issue(acc, ci, cert_domain_list, **issue_kws)
+		log.debug('Signed cert({}) [{}/{}]', ci.key_type, n, len(certs))
 	acc.hooks.run('cert.issued', *cert_domain_list)
 
 	files_used, key_type_suffix = set(), len(certs) > 1
-	for key_type, ci in certs.items():
+	for ci in certs:
 		key_str = ci.key.private_bytes( serialization.Encoding.PEM,
 			serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption() ).decode()
 		p = p_cert_base
 		if key_type_suffix:
-			p = '{}.{}'.format(p.rstrip('.'), key_type)
+			p = '{}.{}'.format(p.rstrip('.'), ci.key_type)
 			if not split_key_file: p += '.pem'
 		p_cert, p_key = (p, None) if not split_key_file else\
 			('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key'])
@@ -596,7 +628,7 @@ def cmd_cert_issue( acc, p_cert_dir, p_cert_base,
 			with safe_replacement(p_cert_dir / p_key, mode=file_mode) as dst: dst.write(key_str)
 		files_used.update((p_cert, p_key))
 		log.info( 'Stored {} certificate/key: {}{}',
-			key_type, p_cert, ' / {}'.format(p_key) if p_key else '' )
+			ci.key_type, p_cert, f' / {p_key}' if p_key else '' )
 	acc.hooks.run('cert.stored', *filter(None, files_used))
 
 	if remove_files_for_prefix:
@@ -632,7 +664,7 @@ def main(args=None):
 					and authorize/sign it with Let's Encrypt "Fake LE Intermediate X1" staging CA:
 
 						% ./acme-cert-tool.py --debug -gk le-staging.acc.key cert-issue \\
-								-d /srv/www/.well-known/acme-challenge le-staging.cert.pem mydomain.com
+								le-staging.cert.pem /srv/www/.well-known/acme-challenge mydomain.com
 
 					EC P-384 (default) account key (along with some metadata, as comments) will be
 					stored in "le-staging.acc.key" file, certificate and its key (also P-384 by default)
@@ -743,40 +775,6 @@ def main(args=None):
 			' associated with the key. It cannot be reactivated again.')
 
 
-	cmd = cmds.add_parser('domain-list',
-		help='List domains that key is authorized to manage certs for.',
-		description='One per line to stdout, from local metadata only.')
-
-	cmd = cmds.add_parser('domain-auth',
-		formatter_class=SmartHelpFormatter,
-		help='Authorize use of key (-k/--account-key-file) to manage certs for specified domain(s).')
-	cmd.add_argument('acme_dir', help='''
-		Directory that is served by domain's httpd at "/.well-known/acme-challenge/".
-		Will be created, if does not exist already.''')
-	cmd.add_argument('domain', nargs='+',
-		help='Domain(s) to authorize for use with specified key (-k/--account-key-file).')
-	cmd.add_argument('-f', '--auth-force', action='store_true',
-		help='Dont skip domains which are already recorded as authorized in local acc metadata.')
-	cmd.add_argument('--auth-poll-params', metavar='delay:attempts',
-		help='Specific auth-result polling interval value (if ACME server'
-				' does not provide one, in seconds) and number of attempts to use.'
-			' Default is to use exponential backoff, with 60s limit and 15 attempts max over ~10min.')
-	cmd.add_argument('--dont-query-local-httpd', action='store_true',
-		help='''
-			Skip querying challege response at a local
-				"well-known" URLs created by this script before submitting them to ACME CA.
-			Default is to query e.g. "example.com/.well-known/acme-challenge/some-token" URL
-				immediately after script creates "some-token" file in acme_dir directory,
-				to make sure it would be accessible to ACME CA servers as well.
-			Can be skipped in configurations where local host should not be able to query that URL.''')
-	cmd.add_argument('-m', '--challenge-file-mode', metavar='octal', default='0644',
-		help='Separate access mode (octal) value to use for ACME challenge file in acme_dir directory.'
-			' Default is 0644 to allow read access for any uid (e.g. httpd) to these files.')
-
-	cmd = cmds.add_parser('domain-deauth', help='Remove authorization for specified domain(s).')
-	cmd.add_argument('domain', nargs='+', help='Domain(s) to deauthenticate.')
-
-
 	cmd = cmds.add_parser('cert-issue',
 		formatter_class=SmartHelpFormatter,
 		help='Generate new X.509 v3 (TLS) certificate/key pair'
@@ -808,6 +806,9 @@ def main(args=None):
 			' idea is to cleanup any old files to avoid confusion.')
 
 	group = cmd.add_argument_group('Certificate info')
+	group.add_argument('acme_dir', help='''
+		Directory that is served by domain's httpd at "/.well-known/acme-challenge/".
+		Will be created, if does not exist already.''')
 	group.add_argument('domain',
 		help='Main domain to issue certificate for.'
 			' Will be used in a certificate Common Name field (CN) and SubjectAltName.')
@@ -824,17 +825,7 @@ def main(args=None):
 			For example, to have country and email attrs in the cert, use:
 			 -i country_name:US -i  email_address:user@myhost.com''')
 
-	group = cmd.add_argument_group('Certificate domain authorization options',
-		description='Options for automatic authorization of'
-			' domain(s) used in a certificate, same as in "domain-auth" command.')
-	group.add_argument('-d', '--acme-dir', metavar='path', help='''
-		Directory that is served by domain's httpd at "/.well-known/acme-challenge/".
-		Must be specified in order for authomatic
-		 authorization for cert domain(s) to be performed.
-		If not specified, domains are assumed to be pre-authorized.
-		Will be created, if does not exist already.''')
-	group.add_argument('-f', '--auth-force', action='store_true',
-		help='Dont skip domains which are already recorded as authorized in local acc metadata.')
+	group = cmd.add_argument_group('Certificate authorization options')
 	group.add_argument('--auth-poll-params', metavar='delay:attempts',
 		help='Specific auth-result polling interval value (if ACME server'
 				' does not provide one, in seconds) and number of attempts to use.'
@@ -866,14 +857,14 @@ def main(args=None):
 			p(desc + '\n')
 		p('Hooks are run synchronously, waiting for subprocess to exit before continuing.')
 		p('All hooks must exit with status 0 to continue operation.')
-		p('Some hooks get passed arguments, as mentioned in hook descriptions.')
+		p('Some/most hooks get passed arguments, as mentioned in hook descriptions.')
 		p('Setting --hook-timeout (defaults to 120s) can be used to abort when hook-scripts hang.')
 		return
 	for v in opts.hook or list():
-		if ':' not in v: parser.error('Invalid --hook spec (must be hook:path): {!r}'.format(v))
+		if ':' not in v: parser.error(f'Invalid --hook spec (must be hook:path): {v!r}')
 		hp, path = v.split(':', 1)
 		if hp not in acc_hooks.points:
-			parser.error('Invaluid hook name: {!r} (see --hook-list)'.format(hp))
+			parser.error(f'Invaluid hook name: {hp!r} (see --hook-list)')
 		acc_hooks[hp] = path
 
 	if opts.umask != '-': os.umask(int(opts.umask, 8) & 0o777)
@@ -882,7 +873,7 @@ def main(args=None):
 	acme_url = opts.acme_service
 	if ':' not in acme_url:
 		try: acme_url = acme_ca_shortcuts[acme_url.replace('-', '_')]
-		except KeyError: parser.error('Unkown --acme-service shortcut: {!r}'.format(acme_url))
+		except KeyError: parser.error(f'Unkown --acme-service shortcut: {acme_url!r}')
 	acme_url = ACMEServer(acme_url)
 	acme_url.d = None
 
@@ -892,11 +883,11 @@ def main(args=None):
 	if opts.gen_key or (opts.gen_key_if_missing and not p_acc_key.exists()):
 		acc_key = AccKey.generate_to_file(p_acc_key, opts.key_type, file_mode=file_mode)
 		if not acc_key:
-			parser.error('Unknown/unsupported --key-type value: {!r}'.format(opts.key_type))
+			parser.error(f'Unknown/unsupported --key-type value: {opts.key_type!r}')
 	elif p_acc_key.exists():
 		acc_key = AccKey.load_from_file(p_acc_key)
-		if not acc_key: parser.error('Unknown/unsupported key type: {}'.format(p_acc_key))
-	else: parser.error('Specified --account-key-file path does not exists: {!r}'.format(p_acc_key))
+		if not acc_key: parser.error(f'Unknown/unsupported key type: {p_acc_key}')
+	else: parser.error(f'Specified --account-key-file path does not exists: {p_acc_key!r}')
 	acc_meta = AccMeta.load_from_key_file(p_acc_key, file_mode=file_mode)
 	log.debug( 'Using {} domain key: {} (acme acc url: {})',
 		acc_key.t, acc_key.pk_hash, acc_meta.get('acc.url') )
@@ -931,8 +922,8 @@ def main(args=None):
 			p_acc_key_old = pl.Path(acc_key_old)
 			acc_key_old = AccKey.load_from_file(p_acc_key_old)
 			if not acc_key_old:
-				parser.error('Unknown/unsupported key type'
-					' specified with -o/--account-key-file-old: {}'.format(p_acc_key))
+				parser.error( f'Unknown/unsupported key type'
+					' specified with -o/--account-key-file-old: {p_acc_key}' )
 			acc_meta_old = AccMeta.load_from_key_file(p_acc_key_old)
 			acc_url_old = acc_meta_old.get('acc.url')
 			if not acc_url_old:
@@ -1008,31 +999,6 @@ def main(args=None):
 		p(res.body.decode())
 
 
-	elif opts.call == 'domain-list':
-		for k in acc.meta.keys():
-			if k.startswith('auth.domain:'): p(k[12:])
-
-	elif opts.call == 'domain-auth':
-		return cmd_domain_auth_batch(
-			acc, opts.domain, opts.acme_dir, opts.challenge_file_mode,
-			opts.auth_poll_params, auth_log=log.info, force=opts.auth_force,
-			query_httpd=not opts.dont_query_local_httpd, acme_retry=acme_retry_opts )
-
-	elif opts.call == 'domain-deauth':
-		for domain in opts.domain:
-			log.debug('Deauthorizing access to domain: {!r}', domain)
-			res = acme_retry_wrap( acc.req,
-				acc.meta['auth.domain:{}'.format(domain)],
-				dict(resource='authz', status='deactivated') )
-			if res.code != 200:
-				p_err('ERROR: deauth request failed for domain: {}', domain)
-				return p_err_for_req(res)
-			log.info('Deauthorized access to domain: {!r}', domain)
-			try: acc.meta.pop('auth.domain:{}'.format(domain))
-			except KeyError: pass
-			else: acc.meta.save()
-
-
 	elif opts.call == 'cert-issue':
 		key_type_list = opts.cert_key_type or ['ec-384']
 		p_cert_base = pl.Path(opts.file_prefix)
@@ -1041,31 +1007,30 @@ def main(args=None):
 		cert_name_attrs = list()
 		for v in opts.cert_name_attrs or list():
 			if ':' not in v:
-				parser.error( 'Invalid --cert-subject-info'
-					' spec (must be attr:value): {!r}'.format(v) )
+				parser.error(f'Invalid --cert-subject-info spec (must be attr:value): {v!r}')
 			cert_name_attrs.append(map(str.strip, v.split(':', 1)))
 
-		auth_possible = bool(opts.acme_dir)
-		for auth_force in [opts.auth_force, True]:
-			if auth_possible:
-				log.debug('Checking authorization for {} cert-domain(s)...', len(cert_domain_list))
-				err = cmd_domain_auth_batch(
-					acc, cert_domain_list, opts.acme_dir, opts.challenge_file_mode,
-					opts.auth_poll_params, force=auth_force, query_httpd=not opts.dont_query_local_httpd )
-				if err: return err
-			try:
-				return cmd_cert_issue( acc, p_cert_dir, p_cert_base,
-					key_type_list, cert_domain_list, cert_name_attrs,
-					file_mode=file_mode, split_key_file=opts.split_key_file,
-					remove_files_for_prefix=opts.remove_files_for_prefix,
-					raise_auth_error=not auth_force, acme_retry=acme_retry_opts )
-			except ACMEDomainAuthError as err:
-				if not auth_possible or auth_force: raise
-				log.debug('Domain auth error for issuing cert, forcing re-auth: {}', err)
+		p_acme_dir = pl.Path(opts.acme_dir)
+		p_acme_dir.mkdir(parents=True, exist_ok=True)
+		token_mode = int(opts.challenge_file_mode, 8) & 0o777
+		if opts.auth_poll_params:
+			delay, attempts = opts.auth_poll_params.split(':', 1)
+			poll_opts = adict(interval=float(delay), attempts=int(attempts))
+		else:
+			poll_opts = adict( attempts=15,
+				interval=lambda n: min(60, (2**n - 1) / 5) )
+		auth_opts = adict( p_acme_dir=p_acme_dir,
+			token_mode=token_mode, poll=poll_opts,
+			query_httpd=not opts.dont_query_local_httpd )
 
+		return cmd_cert_issue( acc, p_cert_dir, p_cert_base,
+			key_type_list, cert_domain_list, cert_name_attrs,
+			file_mode=file_mode, split_key_file=opts.split_key_file,
+			remove_files_for_prefix=opts.remove_files_for_prefix,
+			auth_opts=auth_opts, acme_retry=acme_retry_opts )
 
 	elif not opts.call: parser.error('No command specified')
-	else: parser.error('Unrecognized command: {!r}'.format(opts.call))
+	else: parser.error(f'Unrecognized command: {opts.call!r}')
 
 
 if __name__ == '__main__': sys.exit(main())
