@@ -512,24 +512,24 @@ def domain_auth( acc, domain_set, auth_url,
 				p_err('ERROR: http-01 challenge-status-poll request failed')
 				return p_err_for_req(res)
 
-			res, retry_delay = res.json(), res.headers.get('Retry-After')
-			if res['status'] == 'invalid':
+			data, retry_delay = res.json(), res.headers.get('Retry-After')
+			if data['status'] == 'invalid':
 				p_err('ERROR: http-01 challenge response was rejected by ACME CA')
 				return p_err_for_req(res)
-			if res['status'] == 'valid':
+			if data['status'] == 'valid':
 				try:
-					idn = res.get('identifier')
+					idn = data.get('identifier')
 					if idn is not None:
 						if idn['type'] != 'dns' or idn['value'] != domain: raise KeyError
 					else: # 2019-10-07 - LE returns non-RFC validationRecord list, use that
-						for vr in res['validationRecord']:
+						for vr in data['validationRecord']:
 							if vr['hostname'] == domain: break
 						else: raise KeyError
 				except:
-					return p_err('ERROR: Auth ID mismatch for domain {!r}: {!r}', domain, res)
+					return p_err('ERROR: Auth ID mismatch for domain {!r}: {!r}', domain, data)
 				break
-			if res['status'] not in ['pending', 'processing']:
-				return p_err('ERROR: unknown http-01 challenge status for domain {!r}: {!r}', domain, res)
+			if data['status'] not in ['pending', 'processing']:
+				return p_err('ERROR: unknown http-01 challenge status for domain {!r}: {!r}', domain, data)
 
 			acme_auth_poll_delay( n, poll.interval, retry_delay,
 				ft.partial(acc.hooks.run, 'auth.poll-delay', domain, p_token, n) )
