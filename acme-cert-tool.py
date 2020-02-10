@@ -37,7 +37,7 @@ get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 def safe_replacement(path, *open_args, mode=None, **open_kws):
 	path = str(path)
 	if mode is None:
-		try: mode = stat.S_IMODE(os.lstat(path).st_mode)
+		try: mode = stat.S_IMODE(os.stat(path).st_mode)
 		except OSError: pass
 	open_kws.update( delete=False,
 		dir=os.path.dirname(path), prefix=os.path.basename(path)+'.' )
@@ -607,7 +607,9 @@ def cmd_cert_issue(
 
 	certs = cert_gen(key_type_list, cert_domain_list, cert_name_attrs)
 	for n, ci in enumerate(certs, 1):
-		ci.cert_str = cert_issue(acc, ci, cert_domain_list, **issue_kws)
+		cert_str = cert_issue(acc, ci, cert_domain_list, **issue_kws)
+		if not isinstance(cert_str, str): return 1 # error code from wrapper
+		ci.cert_str = cert_str
 		log.debug('Signed cert({}) [{}/{}]', ci.key_type, n, len(certs))
 	acc.hooks.run('cert.issued', *cert_domain_list)
 
