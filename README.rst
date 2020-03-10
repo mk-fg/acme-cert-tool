@@ -112,6 +112,14 @@ are listed here, let me know if there are any other relevant problems.
   | Does not affect this app, as it only uses http-01 validation.
   | TLS-SNI-01 itself was immediately disabled due to vulnerability to such attacks.
 
+- `CAA Rechecking Incident (2020-02-29) <https://letsencrypt.org/caaproblem/>`_
+
+  Server-side issue with Let's Encrypt. Revocation of ~3mil certs was planned,
+  but was cancelled when it became apparent that they won't get updated in time.
+
+  Shows that you probably should use -e/--contact-email option if possible,
+  though then again, they didn't go through with the revocation, so maybe not.
+
 
 Links
 -----
