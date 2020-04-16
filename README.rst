@@ -5,6 +5,9 @@
 Simple one-stop tool to manage X.509/TLS certs and all the ACME CA
 authorization stuff with minimum dependencies.
 
+Should only work on Linux/*BSD/OSX and possibly WSL,
+but not Windows Server OSes.
+
 .. contents::
   :backlinks: none
 
