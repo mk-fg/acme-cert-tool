@@ -127,13 +127,17 @@ are listed here, let me know if there are any other relevant problems.
 Links
 -----
 
-- `Let's Encrypt <https://letsencrypt.org/>`_
+- ACME certificate providers
 
-  Original public Certificate Authority, issuing certificates for websites via
-  ACME protocol to anyone at no cost.
+  - `Let's Encrypt <https://letsencrypt.org/>`_
 
-  Supports IETF v2 version of ACME protocol, as described in
-  `RFC 8555 <https://tools.ietf.org/html/rfc8555>`_.
+    Original public Certificate Authority, issuing certificates for websites via
+    ACME protocol to anyone at no cost.
+
+    Supports IETF v2 version of ACME protocol, as described in
+    `RFC 8555 <https://tools.ietf.org/html/rfc8555>`_.
+
+  - `ZeroSSL <https://zerossl.com/>`_ - another cert provider.
 
 - `RFC 8555 describing ACME protocol <https://tools.ietf.org/html/rfc8555>`_
 
