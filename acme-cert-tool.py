@@ -507,7 +507,7 @@ def domain_auth( acc, domain_set, auth_url,
 		for n in range(1, poll.attempts+1):
 			acc.hooks.run('auth.poll-attempt', domain, p_token, n)
 			log.debug('Polling auth [{:02d}]: {!r}', n, domain)
-			res = http_req(token_url)
+			res = acc.req(token_url) # POST-as-GET request with ""-body
 			if res.code not in [200, 202]:
 				p_err('ERROR: http-01 challenge-status-poll request failed')
 				return p_err_for_req(res)
