@@ -142,7 +142,7 @@ class AccKey:
 		pk_nums = self.sk.public_key().public_numbers()
 		if self.t.startswith('rsa-'):
 			jwk = dict( kty='RSA',
-				n=b64_b2a_jose(pk_nums.n, int(self.t[4:]) // 16),
+				n=b64_b2a_jose(pk_nums.n, int(self.t[4:]) // 8),
 				e=b64_b2a_jose(pk_nums.e, 3) )
 		elif self.t == 'ec-384':
 			jwk = dict( kty='EC', crv='P-384',
