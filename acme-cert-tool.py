@@ -907,10 +907,9 @@ def main(args=None):
 
 	### Handle account status
 
-	acc_key_old = opts.account_key_file_old
+	acc_contact, acc_key_old = opts.contact_email, opts.account_key_file_old
 	acc_register = opts.register or acc_key_old or not acc_meta.get('acc.url')
-	acc_contact = opts.contact_email
-	if not (acc_contact and acc_contact.startswith('mailto:')): acc_contact = f'mailto:{acc_contact}'
+	if acc_contact and not acc_contact.startswith('mailto:'): acc_contact = f'mailto:{acc_contact}'
 
 	payload_reg = {'termsOfServiceAgreed': True}
 	if acc_register:
