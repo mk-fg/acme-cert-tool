@@ -729,7 +729,8 @@ def main(args=None):
 	group.add_argument('-e', '--contact-email', metavar='email',
 		help='Email address for any account-specific issues,'
 				' warnings and notifications to register along with the key.'
-			' If was not specified previously or differs from that, will be automatically updated.')
+			' If was not specified previously or differs from that, will be automatically updated.'
+			' Required for registering new accounts.')
 	group.add_argument('-o', '--account-key-file-old', metavar='path',
 		help='''
 			Issue a key-change command from an old key specified with this option.
@@ -883,6 +884,8 @@ def main(args=None):
 		parser.error('Path for -k/--account-key-file must be specified.')
 	p_acc_key = pl.Path(opts.account_key_file)
 	if opts.gen_key or (opts.gen_key_if_missing and not p_acc_key.exists()):
+		if not opts.contact_email:
+			parser.error('-g/--gen-key option(s) require -e/--contact-email to be specified')
 		acc_key = AccKey.generate_to_file(p_acc_key, opts.key_type, file_mode=file_mode)
 		if not acc_key:
 			parser.error(f'Unknown/unsupported --key-type value: {opts.key_type!r}')
@@ -907,7 +910,7 @@ def main(args=None):
 	acc_key_old = opts.account_key_file_old
 	acc_register = opts.register or acc_key_old or not acc_meta.get('acc.url')
 	acc_contact = opts.contact_email
-	if not acc_contact.startswith('mailto:'): acc_contact = f'mailto:{acc_contact}'
+	if not (acc_contact and acc_contact.startswith('mailto:')): acc_contact = f'mailto:{acc_contact}'
 
 	payload_reg = {'termsOfServiceAgreed': True}
 	if acc_register:
