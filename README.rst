@@ -139,6 +139,17 @@ Links
 
   - `ZeroSSL <https://zerossl.com/>`_ - another cert provider.
 
+  - `Buypass Go SSL <https://www.buypass.com/ssl/products/acme>`_
+
+  - `SSL.com <https://www.ssl.com/>`_ - seem to provide ACME certs
+    `after free registration <https://scotthelme.co.uk/heres-another-free-ca-as-an-alternative-to-lets-encrypt/>`_.
+
+  I've only used LE myself, so no idea if others are any good, though note that
+  since all private keys are always client-side only, practical differences between
+  them should be cert expiration time (i.e. how often this script needs to run),
+  Terms of Service, ACME API reliability (uptime, bugs, etc) and how long - if any -
+  is their intermediate certificate chain is (which you might want to bundle in the cert file).
+
 - `RFC 8555 describing ACME protocol <https://tools.ietf.org/html/rfc8555>`_
 
 - `Let's Encrypt "Chain of Trust" page <https://letsencrypt.org/certificates/>`_
@@ -187,5 +198,5 @@ Links
     - `github letsencrypt/boulder issue #3649
       <https://github.com/letsencrypt/boulder/issues/3649>`_
 
-Last updated on 2019-10-07,
+Last updated on 2021-08-20,
 please open an issue if you notice any outdated info/links.
