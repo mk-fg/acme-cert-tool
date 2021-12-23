@@ -5,8 +5,7 @@
 Simple one-stop tool to manage X.509/TLS certs and all the ACME CA
 authorization stuff with minimum dependencies.
 
-Should only work on Linux/*BSD/OSX and possibly WSL,
-but not Windows Server OSes.
+Should work in unix-like environments like Linux/\*BSD/OSX and WSL2.
 
 .. contents::
   :backlinks: none
@@ -19,7 +18,7 @@ Main features
   with RSA also supported as a fallback option where still necessary
   (e.g. certs for old clients that can't do ECC).
 
-- Can issue multiple certificate for diff key types in one command.
+- Can issue multiple certificates for diff key types in one command.
 
 - Single python3 script implementation,
   only dependent on `cryptography.io <https://cryptography.io/>`_ module.
@@ -27,7 +26,7 @@ Main features
 - Does not use openssl command-line tools nor ever requires user to run them.
 
 - Designed with automated non-interactive "setup cert, auto-renewal and forget"
-  operation in mind, all with a single command if possible.
+  operation in mind, all with a single command, if possible.
 
 - Does not do anything with httpd or any other daemons and their configuration.
 
@@ -56,8 +55,8 @@ stored in "le-staging.acc" file (note: account key has nothing to do with
 certificate), certificate (chain) and its key (also P-384 by default) in
 "le-staging.cert.pem" file.
 
-Can be re-run to generate new certificate there (i.e. renew) with the same
-account key and domain authorization (-g/--gen-key-if-missing does not regen key files).
+Can be re-run to generate new certificate there (i.e. renew) with same account key
+and domain authorization (-g/--gen-key-if-missing does not regen key files).
 
 To use non-staging server with "legit" intermediate
 (be sure to check ToS and limits first!), simply add "-s le" there.
