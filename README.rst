@@ -10,6 +10,12 @@ Should work in unix-like environments like Linux/\*BSD/OSX and WSL2.
 .. contents::
   :backlinks: none
 
+This repository URLs:
+
+- https://github.com/mk-fg/acme-cert-tool
+- https://codeberg.org/mk-fg/acme-cert-tool
+- https://fraggod.net/code/git/acme-cert-tool
+
 
 Main features
 -------------
@@ -145,9 +151,10 @@ Links
 
   I've only used LE myself, so no idea if others are any good, though note that
   since all private keys are always client-side only, practical differences between
-  them should be cert expiration time (i.e. how often this script needs to run),
-  Terms of Service, ACME API reliability (uptime, bugs, etc) and how long - if any -
-  is their intermediate certificate chain is (which you might want to bundle in the cert file).
+  them should be cert expiration time (i.e. how often this script needs to run), Terms of Service,
+  `Certificate Transparency logs <https://en.wikipedia.org/wiki/Certificate_Transparency>`_
+  (see `crt.sh <https://crt.sh>`_ and such), ACME API reliability (uptime, bugs, etc), and how long -
+  if any - is their intermediate certificate chain (affecting size of cert bundle served to clients).
 
 - `RFC 8555 describing ACME protocol <https://tools.ietf.org/html/rfc8555>`_
 
