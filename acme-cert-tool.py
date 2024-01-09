@@ -416,7 +416,7 @@ def acme_auth_retry(func, *args, retry_n=0, retry_timeout=0, **kws):
 
 def acme_auth_poll_delay(n, poll_interval, retry_delay=None, delay_hook=None):
 	'Sleep according to Retry-After response header value (retry_delay) or poll_interval.'
-	if retry_delay:
+	if retry_delay and (retry_delay := str(retry_delay).strip()):
 		if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
 		else:
 			retry_delay = email.utils.parsedate_to_datetime(retry_delay)
@@ -465,19 +465,17 @@ def domain_auth( acc, domain_set, auth_url,
 	if res.code != 200:
 		p_err('ERROR: Auth info request failed: {}', auth_url)
 		return p_err_for_req(res)
-	domain = res.json()['identifier']['value']
-	if domain not in domain_set:
+	data = res.json()
+	if (domain := data['identifier']['value']) not in domain_set:
 		p_err('ERROR: Auth-URL domain {!r} not in requested set: {!r}', domain, domain_set)
 		return p_err_for_req(res)
-	res = res.json()
-	if res['status'] == 'valid':
-		log.debug('Pre-authorized access to domain: {!r}', domain)
-		return
+	if data['status'] == 'valid':
+		return log.debug('Pre-authorized access to domain: {!r}', domain)
 
 	log.debug('Authorizing access to domain: {!r}', domain)
 	acc.hooks.run('auth.start', domain)
 
-	for ch in res['challenges']:
+	for ch in data['challenges']:
 		if ch['type'] == 'http-01': break
 	else:
 		p_err('ERROR: No supported challenge types offered for domain: {!r}', domain)
@@ -564,9 +562,8 @@ def cert_issue(acc, ci, cert_domain_list, auth_opts, acme_retry=dict()):
 
 	acc.hooks.run('auth.start-all', *auth_domains)
 	for auth_url in res['authorizations']:
-		err = acme_retry_wrap( domain_auth, acc,
-			set(auth_domains), auth_url, **auth_opts )
-		if err: return err
+		if err := acme_retry_wrap( domain_auth, acc,
+			set(auth_domains), auth_url, **auth_opts ): return err
 	acc.hooks.run('auth.done-all', *auth_domains)
 
 	log.debug('Submitting CSR({}) for signing', ci.key_type)
@@ -575,19 +572,20 @@ def cert_issue(acc, ci, cert_domain_list, auth_opts, acme_retry=dict()):
 	if res.code != 200:
 		p_err('ERROR: Failed to finalize ACME challenge')
 		return p_err_for_req(res)
-	res = res.json()
+	order_url = res.headers.get('Location')
+	res, retry_delay = res.json(), res.headers.get('Retry-After')
 
 	if res['status'] == 'processing':
 		for n in range(1, auth_opts.poll.attempts+1):
 			acme_auth_poll_delay(
-				n, auth_opts.poll.interval, res.headers.get('Retry-After'),
+				n, auth_opts.poll.interval, retry_delay,
 				lambda d: acc.hooks.run('cert.poll-delay', n, d, *cert_domain_list) )
 			log.debug('Checking cert({}) signing status [{:02d}]', ci.key_type, n)
-			res = acme_retry_wrap(acc.req, auth_url_final)
-			if res.code not in 200:
+			res = acme_retry_wrap(acc.req, order_url)
+			if res.code != 200:
 				p_err('ERROR: signing-status-poll request failed')
 				return p_err_for_req(res)
-			res = res.json()
+			res, retry_delay = res.json(), res.headers.get('Retry-After', n)
 			if res['status'] != 'processing': break
 
 	if res['status'] != 'valid':
