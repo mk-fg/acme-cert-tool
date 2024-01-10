@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 
+# /// pyproject
+# [run]
+# requirements = ["cryptography"]
+# ///
+
 import itertools as it, operator as op, functools as ft
 import os, sys, stat, tempfile, contextlib, logging, re, pathlib as pl
 import time, math, base64, hashlib, json, email.utils, textwrap
@@ -572,7 +577,7 @@ def cert_issue(acc, ci, cert_domain_list, auth_opts, acme_retry=dict()):
 	if res.code != 200:
 		p_err('ERROR: Failed to finalize ACME challenge')
 		return p_err_for_req(res)
-	order_url = res.headers.get('Location')
+	order_url = res.headers['Location']
 	res, retry_delay = res.json(), res.headers.get('Retry-After')
 
 	if res['status'] == 'processing':

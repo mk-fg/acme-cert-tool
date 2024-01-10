@@ -62,13 +62,13 @@ certificate), certificate (chain) and its key (also P-384 by default) in
 "le-staging.cert.pem" file.
 
 Can be re-run to generate new certificate there (i.e. renew) with same account key
-and domain authorization (-g/--gen-key-if-missing does not regen key files).
+and domain authorization (``-g/--gen-key-if-missing`` does not regen key files).
 
 To use non-staging server with "legit" intermediate
-(be sure to check ToS and limits first!), simply add "-s le" there.
+(be sure to check ToS and limits first!), simply add ``-s le`` there.
 
 When configuring Web Server after that, it should use resulting \*.pem
-as both certificate chain and key (see also -s/--split-key-file option).
+as both certificate chain and key (see also ``-s/--split-key-file`` option).
 
 Run ``./acme-cert-tool.py -h`` to get more information on all supported commands
 and options, and e.g. ``./acme-cert-tool.py cert-issue -h`` to see info and options
@@ -78,24 +78,36 @@ for a specific command.
 Installation
 ------------
 
-Install python3 (3.7+) and `cryptography <https://cryptography.io/>`_ module::
+This is a python (3.8+) script, using `cryptography <https://cryptography.io/>`_ module.
+It's not in a PyPI_ registry.
 
-  # pacman -S python python-cryptography
+pipx_ can be used to run the tool via "pipx run", auto-installing "cryptography" to an ad-hoc venv::
 
-Download and run the script::
+  % curl -OL https://raw.githubusercontent.com/mk-fg/acme-cert-tool/master/acme-cert-tool.py
+  % pipx run acme-cert-tool.py --help
 
-  % curl -O https://raw.githubusercontent.com/mk-fg/acme-cert-tool/master/acme-cert-tool.py
+Alternatively, OS/distro package manager can be used to install necessary dependencies::
+
+  archlinux# pacman -S python python-cryptography
+  debian/ubuntu# apt-get install --no-install-recommends python3-minimal python3-cryptography
+
+Then just download (or git-clone) and run the script::
+
+  % curl -OL https://raw.githubusercontent.com/mk-fg/acme-cert-tool/master/acme-cert-tool.py
   % chmod +x acme-cert-tool.py
   % ./acme-cert-tool.py --help
 
-Unless some errors pop-up immediately, everything is installed correctly and ready to use.
+Unless any errors pop-up immediately, everything is installed correctly and ready to use.
 
-There is no need to run this script as root, use -m/--mode, --challenge-file-mode
-options and ACLs (``setfacl -m d:...``) to share files between different uids/gids.
+There is no need to run this script as root, use its ``-m/--mode``, ``--challenge-file-mode``
+options and/or ACLs (``setfacl -m d:...``) to share files between different uids/gids easily.
+
+.. _PyPI: https://pypi.org/
+.. _pipx: https://pypa.github.io/pipx/
 
 
-Bugs and Vulnerabilities
-------------------------
+ACME-related bugs and vulnerabilities
+-------------------------------------
 
 Ones that I'm aware of wrt either ACME protocol or this specific implementation
 are listed here, let me know if there are any other relevant problems.
@@ -125,7 +137,7 @@ are listed here, let me know if there are any other relevant problems.
   Server-side issue with Let's Encrypt. Revocation of ~3mil certs was planned,
   but was cancelled when it became apparent that they won't get updated in time.
 
-  Shows that you probably should use -e/--contact-email option if possible,
+  Shows that you probably should use ``-e/--contact-email`` option if possible,
   though then again, they didn't go through with the revocation, so maybe not.
 
 
