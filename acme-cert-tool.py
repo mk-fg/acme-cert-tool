@@ -577,10 +577,11 @@ def cert_issue(acc, ci, cert_domain_list, auth_opts, acme_retry=dict()):
 	if res.code != 200:
 		p_err('ERROR: Failed to finalize ACME challenge')
 		return p_err_for_req(res)
-	order_url = res.headers['Location']
+	order_url = res.headers.get('Location') # only required for status-checks
 	res, retry_delay = res.json(), res.headers.get('Retry-After')
 
 	if res['status'] == 'processing':
+		if not order_url: return p_err('ERROR: missing signing-status-poll Location header')
 		for n in range(1, auth_opts.poll.attempts+1):
 			acme_auth_poll_delay(
 				n, auth_opts.poll.interval, retry_delay,
