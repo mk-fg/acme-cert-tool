@@ -106,8 +106,8 @@ options and/or ACLs (``setfacl -m d:...``) to share files between different uids
 .. _pipx: https://pypa.github.io/pipx/
 
 
-ACME-related bugs and vulnerabilities
--------------------------------------
+ACME-related bugs, issues, vulnerabilities
+------------------------------------------
 
 Ones that I'm aware of wrt either ACME protocol or this specific implementation
 are listed here, let me know if there are any other relevant problems.
@@ -139,6 +139,16 @@ are listed here, let me know if there are any other relevant problems.
 
   Shows that you probably should use ``-e/--contact-email`` option if possible,
   though then again, they didn't go through with the revocation, so maybe not.
+
+- `Let's Encrypt Chain of Trust change (2024-09-30, announced 2023-07-10)
+  <https://letsencrypt.org/2023/07/10/cross-sign-expiration.html>`_
+
+  Final change from IdenTrust root CA to its own ISRG root CA, which can affect
+  devices that weren't updated to include new root cert or ones with an otherwise
+  fixed/limited CA list.
+
+  LE is expected to start returning smaller cert-chain for new certs requested
+  from 2024-06-06 onwards, with no changes or updates to this script or its usage.
 
 
 Links
