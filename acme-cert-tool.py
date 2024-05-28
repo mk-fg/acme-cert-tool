@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 
-# /// pyproject
-# [run]
-# requirements = ["cryptography"]
+# /// script
+# dependencies = ["cryptography"]
 # ///
 
 import itertools as it, operator as op, functools as ft
