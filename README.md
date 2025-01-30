@@ -22,7 +22,6 @@ This repository URLs:
 
 
 <a name=hdr-main_features></a>
-<a name=user-content-hdr-main_features></a>
 ## Main features
 
 - P-384 (secp384r1) ECC keys and certs are supported and the default,
@@ -54,7 +53,6 @@ see `./acme-cert-tool.py --hook-list` for more info on these.
 
 
 <a name=hdr-usage_example></a>
-<a name=user-content-hdr-usage_example></a>
 ## Usage example
 
 ```
@@ -82,7 +80,6 @@ for a specific command.
 
 
 <a name=hdr-installation></a>
-<a name=user-content-hdr-installation></a>
 ## Installation
 
 This is a python (3.8+) script, using [cryptography] module.
@@ -121,7 +118,6 @@ options and/or ACLs (``setfacl -m d:...``) to share files between different uids
 
 
 <a name=hdr-acme-related_bugs_issues_vulnerabilities></a>
-<a name=user-content-hdr-acme-related_bugs_issues_vulnerabilities></a>
 ## ACME-related bugs, issues, vulnerabilities
 
 Ones that I'm aware of wrt either ACME protocol or this specific implementation
@@ -174,7 +170,6 @@ are listed here, let me know if there are any other relevant problems.
 
 
 <a name=hdr-links></a>
-<a name=user-content-hdr-links></a>
 ## Links
 
 - ACME certificate providers
@@ -185,7 +180,7 @@ are listed here, let me know if there are any other relevant problems.
     ACME protocol to anyone at no cost.
 
     Supports IETF v2 version of ACME protocol, as described in
-    [RFC 8555](https://tools.ietf.org/html/rfc8555>).
+    [RFC 8555](https://tools.ietf.org/html/rfc8555).
 
   - [ZeroSSL](https://zerossl.com/) - another cert provider.
 
