@@ -40,7 +40,8 @@ This repository URLs:
 
 - Does not do anything with httpd or any other daemons and their configuration.
 
-- Uses "ACME v2" protocol supported by Let's Encrypt since after April 2018.
+- Uses "ACME v2" protocol supported by Let's Encrypt since after April 2018,
+  with "http-01" validation only (token at \/.well-known\/acme-challenge\/ URL over HTTP).
 
 Can generate/use/roll-over account keys (ec-384/rsa-2048/rsa-4096,
 pem pkcs8 or openssl/pkcs1), register/query/deactivate accounts,
@@ -60,10 +61,12 @@ see `./acme-cert-tool.py --hook-list` for more info on these.
    le-staging.cert.pem /srv/www/.well-known/acme-challenge mydomain.com
 ```
 
+(``/srv/www/`` dir is assumed to be exposed on http://mydomain.com here)
+
 EC P-384 (default) account key (along with some metadata, as comments) will be
 stored in "le-staging.acc" file (note: account key has nothing to do with
 certificate), certificate (chain) and its key (also P-384 by default) in
-"le-staging.cert.pem" file.
+"le-staging.cert.pem" file. "http-01" validation type is used.
 
 Can be re-run to generate new certificate there (i.e. renew) with same account key
 and domain authorization (`-g/--gen-key-if-missing` does not regen key files).
@@ -71,7 +74,7 @@ and domain authorization (`-g/--gen-key-if-missing` does not regen key files).
 To use non-staging server with "legit" intermediate
 (be sure to check ToS and limits first!), simply add `-s le` there.
 
-When configuring Web Server after that, it should use resulting \*.pem
+When configuring web server after that, it should use resulting \*.pem
 as both certificate chain and key (see also `-s/--split-key-file` option).
 
 Run `./acme-cert-tool.py -h` to get more information on all supported commands
