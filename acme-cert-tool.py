@@ -10,11 +10,11 @@ import time, math, base64, hashlib, json, email.utils, textwrap
 
 from urllib.request import urlopen, Request, URLError, HTTPError
 
-import cryptography # cryptography.io
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa, ec
-from cryptography.hazmat.backends import default_backend
-crypto_backend = default_backend()
+import cryptography.x509 as cr_x509 # cryptography.io
+import cryptography.hazmat.primitives as cr_hp
+import cryptography.hazmat.primitives.asymmetric as cr_hpa
+import cryptography.hazmat.backends as cr_hb
+crypto_backend = cr_hb.default_backend()
 
 
 acme_ca_shortcuts = dict(
@@ -126,10 +126,10 @@ def generate_crypto_key(key_type):
 	if key_type.startswith('rsa-'):
 		key_bits = int(key_type[4:])
 		if key_bits not in [2048, 4096]: return
-		return rsa.generate_private_key(65537, key_bits, crypto_backend)
+		return cr_hpa.rsa.generate_private_key(65537, key_bits, crypto_backend)
 	elif key_type.startswith('ec-'):
 		if key_type != 'ec-384': return
-		return ec.generate_private_key(ec.SECP384R1(), crypto_backend)
+		return cr_hpa.ec.generate_private_key(cr_hpa.ec.SECP384R1(), crypto_backend)
 
 
 class AccKey:
@@ -153,13 +153,13 @@ class AccKey:
 				x=b64_b2a_jose(pk_nums.x, 48),
 				y=b64_b2a_jose(pk_nums.y, 48) )
 		else: raise ValueError(self.t)
-		digest = hashes.Hash(hashes.SHA256(), crypto_backend)
+		digest = cr_hp.hashes.Hash(cr_hp.hashes.SHA256(), crypto_backend)
 		digest.update(json.dumps(jwk, sort_keys=True, separators=(',', ':')).encode())
 		# log.debug('Key JWK: {}', jwk)
 		return jwk, b64_b2a_jose(digest.finalize())
 
 	def _pk_hash(self, trunc_len=8):
-		digest = hashes.Hash(hashes.SHA256(), crypto_backend)
+		digest = cr_hp.hashes.Hash(cr_hp.hashes.SHA256(), crypto_backend)
 		digest.update('\0'.join([self.t, self.jwk_thumbprint]).encode())
 		return b64_b2a_jose(digest.finalize())[:trunc_len]
 
@@ -168,7 +168,7 @@ class AccKey:
 		if self.t.startswith('rsa-'):
 			# https://tools.ietf.org/html/rfc7518#section-3.1 mandates pkcs1.5
 			alg, sign_func = 'RS256', ft.partial( self.sk.sign,
-				padding=padding.PKCS1v15(), algorithm=hashes.SHA256() )
+				padding=cr_hpa.padding.PKCS1v15(), algorithm=cr_hp.hashes.SHA256() )
 		elif self.t == 'ec-384':
 			alg, sign_func = 'ES384', ft.partial(self._sign_func_es384, self.sk)
 		else: raise ValueError(self.t)
@@ -182,7 +182,7 @@ class AccKey:
 		#  where: b1 = length of stuff after it, b2 = len(vr), b3 = len(vs)
 		#  vr and vs are encoded as signed ints, so can have extra leading 0x00
 		# See JWA - https://tools.ietf.org/html/rfc7518#section-3.4
-		sig_der = sk.sign(data, signature_algorithm=ec.ECDSA(hashes.SHA384()))
+		sig_der = sk.sign(data, signature_algorithm=cr_hpa.ec.ECDSA(cr_hp.hashes.SHA384()))
 		rs_len, rn, r_len = sig_der[1], 4, sig_der[3]
 		sn, s_len = rn + r_len + 2, sig_der[rn + r_len + 1]
 		assert sig_der[0] == 0x30 and sig_der[rn-2] == sig_der[sn-2] == 0x02
@@ -194,9 +194,8 @@ class AccKey:
 	def generate_to_file(cls, p_acc_key, key_type, file_mode=None):
 		acc_key = generate_crypto_key(key_type)
 		if acc_key:
-			acc_key_pem = acc_key.private_bytes(
-				serialization.Encoding.PEM,
-				serialization.PrivateFormat.PKCS8, serialization.NoEncryption() )
+			acc_key_pem = acc_key.private_bytes( cr_hp.serialization.Encoding.PEM,
+				cr_hp.serialization.PrivateFormat.PKCS8, cr_hp.serialization.NoEncryption() )
 			p_acc_key.parent.mkdir(parents=True, exist_ok=True)
 			with safe_replacement( p_acc_key,
 				'wb', mode=file_mode ) as dst: dst.write(acc_key_pem)
@@ -205,13 +204,13 @@ class AccKey:
 
 	@classmethod
 	def load_from_file(cls, p_acc_key):
-		acc_key = serialization.load_pem_private_key(
+		acc_key = cr_hp.serialization.load_pem_private_key(
 			p_acc_key.read_bytes(), None, crypto_backend )
-		if isinstance(acc_key, rsa.RSAPrivateKey):
+		if isinstance(acc_key, cr_hpa.rsa.RSAPrivateKey):
 			assert acc_key.key_size in [2048, 4096]
 			acc_key_t = f'rsa-{acc_key.key_size}'
-		elif isinstance(acc_key, ec.EllipticCurvePrivateKey)\
-			and acc_key.curve.name == 'secp384r1': acc_key_t = 'ec-384'
+		elif ( isinstance(acc_key, cr_hpa.ec.EllipticCurvePrivateKey)
+			and acc_key.curve.name == 'secp384r1' ): acc_key_t = 'ec-384'
 		else: return None
 		return cls(acc_key_t, acc_key)
 
@@ -439,16 +438,14 @@ def acme_auth_poll_delay(n, poll_interval, retry_delay=None, delay_hook=None):
 
 def cert_gen(key_type_list, cert_domain_list, cert_name_attrs):
 	'Generate list of X509CertInfo objects with keys and CSRs for specified key types.'
-	x509, NameOID = cryptography.x509, cryptography.x509.oid.NameOID
-	csr = x509.CertificateSigningRequestBuilder()
-	csr_name = list()
+	csr_name, csr = list(), cr_x509.CertificateSigningRequestBuilder()
 	for k, v in cert_name_attrs:
-		csr_name.append(x509.NameAttribute(getattr(NameOID, k.upper()), v))
-	csr_name.append(x509.NameAttribute(
-		NameOID.COMMON_NAME, cert_domain_list[0] ))
-	csr = csr.subject_name(x509.Name(csr_name))
-	csr = csr.add_extension(x509.SubjectAlternativeName(
-		list(map(x509.DNSName, cert_domain_list)) ), critical=False)
+		csr_name.append(cr_x509.NameAttribute(getattr(cr_x509.oid.NameOID, k.upper()), v))
+	csr_name.append(cr_x509.NameAttribute(
+		cr_x509.oid.NameOID.COMMON_NAME, cert_domain_list[0] ))
+	csr = csr.subject_name(cr_x509.Name(csr_name))
+	csr = csr.add_extension(cr_x509.SubjectAlternativeName(
+		list(map(cr_x509.DNSName, cert_domain_list)) ), critical=False)
 
 	certs = list()
 	for key_type in key_type_list:
@@ -457,7 +454,7 @@ def cert_gen(key_type_list, cert_domain_list, cert_name_attrs):
 		ci.key = generate_crypto_key(key_type)
 		if not ci.key:
 			raise ACMEError('Unknown/unsupported --cert-key-type value: {key_type!r}')
-		ci.csr = csr.sign(ci.key, hashes.SHA256(), crypto_backend)
+		ci.csr = csr.sign(ci.key, cr_hp.hashes.SHA256(), crypto_backend)
 		certs.append(ci)
 	return certs
 
@@ -547,7 +544,7 @@ def domain_auth( acc, domain_set, auth_url,
 def cert_issue(acc, ci, cert_domain_list, auth_opts, acme_retry=dict()):
 	'Return signed-pem-certificate-chain str for X509CertInfo object (CSR).'
 	acme_retry_wrap = ft.partial(acme_auth_retry, **acme_retry)
-	csr_der = ci.csr.public_bytes(serialization.Encoding.DER)
+	csr_der = ci.csr.public_bytes(cr_hp.serialization.Encoding.DER)
 	acc.hooks.run('cert.csr-check', ci.key_type, *cert_domain_list, stdin=csr_der)
 
 	# 2019-10-07 - passing any non-empty notBefore/notAfter is not supported:
@@ -618,14 +615,16 @@ def cmd_cert_issue(
 
 	files_used, key_type_suffix = set(), len(certs) > 1
 	for ci in certs:
-		key_str = ci.key.private_bytes( serialization.Encoding.PEM,
-			serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption() ).decode()
+		key_str = ci.key.private_bytes(
+			cr_hp.serialization.Encoding.PEM,
+			cr_hp.serialization.PrivateFormat.TraditionalOpenSSL,
+			cr_hp.serialization.NoEncryption() ).decode()
 		p = p_cert_base
 		if key_type_suffix:
 			p = '{}.{}'.format(p.rstrip('.'), ci.key_type)
 			if not split_key_file: p += '.pem'
-		p_cert, p_key = (p, None) if not split_key_file else\
-			('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key'])
+		p_cert, p_key = ( (p, None) if not split_key_file else
+			('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key']) )
 		with safe_replacement(p_cert_dir / p_cert, mode=file_mode) as dst:
 			dst.write(ci.cert_str)
 			if not p_key: dst.write(key_str)
