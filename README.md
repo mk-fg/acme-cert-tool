@@ -43,6 +43,8 @@ This repository URLs:
 - Uses "ACME v2" protocol supported by Let's Encrypt since after April 2018,
   with "http-01" validation only (token at \/.well-known\/acme-challenge\/ URL over HTTP).
 
+- Has hooks at all steps of the process to add any custom scripts, if needed.
+
 Can generate/use/roll-over account keys (ec-384/rsa-2048/rsa-4096,
 pem pkcs8 or openssl/pkcs1), register/query/deactivate accounts,
 generate configurable X.509 CSRs (ec-384/rsa-2048/rsa-4096 keys, pem
@@ -150,7 +152,6 @@ are listed here, let me know if there are any other relevant problems.
 
   Shows that you probably should use `-e/--contact-email` option if possible,
   though then again, they didn't go through with the revocation, so maybe not.
-
 
 - [Let's Encrypt Chain of Trust change (2024-09-30, announced 2023-07-10)]
 

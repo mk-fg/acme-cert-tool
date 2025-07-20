@@ -4,9 +4,9 @@
 # dependencies = ["cryptography"]
 # ///
 
-import itertools as it, operator as op, functools as ft
-import os, sys, stat, tempfile, contextlib, logging, re, pathlib as pl
-import time, math, base64, hashlib, json, email.utils, textwrap
+import itertools as it, functools as ft, contextlib as cl, pathlib as pl
+import os, sys, stat, tempfile, logging, re, time, math
+import base64, hashlib, json, email.utils, textwrap
 
 from urllib.request import urlopen, Request, URLError, HTTPError
 
@@ -37,7 +37,7 @@ class LogStyleAdapter(logging.LoggerAdapter):
 
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
-@contextlib.contextmanager
+@cl.contextmanager
 def safe_replacement(path, *open_args, mode=None, **open_kws):
 	path = str(path)
 	if mode is None:
@@ -48,12 +48,18 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 	if not open_args: open_kws['mode'] = 'w'
 	with tempfile.NamedTemporaryFile(*open_args, **open_kws) as tmp:
 		try:
+			done = False
+			def _commit():
+				nonlocal done
+				if done: return
+				if not tmp.closed: tmp.flush()
+				os.rename(tmp.name, path)
+				done = True
 			if mode is not None: os.fchmod(tmp.fileno(), mode)
-			yield tmp
-			if not tmp.closed: tmp.flush()
-			os.rename(tmp.name, path)
+			yield adict(file=tmp, commit=_commit)
+			_commit()
 		finally:
-			try: os.unlink(tmp.name)
+			try: done or os.unlink(tmp.name)
 			except OSError: pass
 
 
@@ -198,7 +204,7 @@ class AccKey:
 				cr_hp.serialization.PrivateFormat.PKCS8, cr_hp.serialization.NoEncryption() )
 			p_acc_key.parent.mkdir(parents=True, exist_ok=True)
 			with safe_replacement( p_acc_key,
-				'wb', mode=file_mode ) as dst: dst.write(acc_key_pem)
+				'wb', mode=file_mode ) as dst: dst.file.write(acc_key_pem)
 			acc_key = cls(key_type, acc_key)
 		return acc_key
 
@@ -241,12 +247,12 @@ class AccMeta(dict):
 				for line in src:
 					m = self.re_meta.search(line)
 					if m: continue
-					dst.write(line)
+					dst.file.write(line)
 					final_newline = line.endswith('\n')
-			if not final_newline: dst.write('\n')
+			if not final_newline: dst.file.write('\n')
 			for k, v in self.items():
 				if v is None: continue
-				dst.write(f'## acme.{k}: {json.dumps(v)}\n')
+				dst.file.write(f'## acme.{k}: {json.dumps(v)}\n')
 
 
 class ACMEServer(str): __slots__ = 'd', # /directory cache
@@ -388,7 +394,7 @@ class AccSetup:
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
 class X509CertInfo:
-	__slots__ = 'key_type key csr cert_str'.split()
+	__slots__ = 'key_type key csr cert_str files'.split()
 	def __init__(self, *args, **kws):
 		for k,v in it.chain(zip(self.__slots__, args), kws.items()): setattr(self, k, v)
 
@@ -487,7 +493,7 @@ def domain_auth( acc, domain_set, auth_url,
 			' non-alphanum/b64 token value (security issue): {!r}', token )
 	key_authz = f'{token}.{acc.key.jwk_thumbprint}'
 	p_token = p_acme_dir / token
-	with safe_replacement(p_token, mode=token_mode) as dst: dst.write(key_authz)
+	with safe_replacement(p_token, mode=token_mode) as dst: dst.file.write(key_authz)
 	try:
 
 		acc.hooks.run('auth.publish-challenge', domain, p_token)
@@ -606,33 +612,37 @@ def cmd_cert_issue(
 		split_key_file=False, file_mode=0o600, remove_files_for_prefix=False, **issue_kws ):
 
 	certs = cert_gen(key_type_list, cert_domain_list, cert_name_attrs)
-	for n, ci in enumerate(certs, 1):
-		cert_str = cert_issue(acc, ci, cert_domain_list, **issue_kws)
-		if not isinstance(cert_str, str): return 1 # error code from wrapper
-		ci.cert_str = cert_str
-		log.debug('Signed cert({}) [{}/{}]', ci.key_type, n, len(certs))
-	acc.hooks.run('cert.issued', *cert_domain_list)
-
 	files_used, key_type_suffix = set(), len(certs) > 1
-	for ci in certs:
-		key_str = ci.key.private_bytes(
-			cr_hp.serialization.Encoding.PEM,
-			cr_hp.serialization.PrivateFormat.TraditionalOpenSSL,
-			cr_hp.serialization.NoEncryption() ).decode()
-		p = p_cert_base
-		if key_type_suffix:
-			p = '{}.{}'.format(p.rstrip('.'), ci.key_type)
-			if not split_key_file: p += '.pem'
-		p_cert, p_key = ( (p, None) if not split_key_file else
-			('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key']) )
-		with safe_replacement(p_cert_dir / p_cert, mode=file_mode) as dst:
-			dst.write(ci.cert_str)
-			if not p_key: dst.write(key_str)
-		if p_key:
-			with safe_replacement(p_cert_dir / p_key, mode=file_mode) as dst: dst.write(key_str)
-		files_used.update((p_cert, p_key))
-		log.info( 'Stored {} certificate/key: {}{}',
-			ci.key_type, p_cert, f' / {p_key}' if p_key else '' )
+	with cl.ExitStack() as ctx:
+		for ci in certs: # open files first, to avoid getting certs if they can't be stored
+			p = p_cert_base
+			if key_type_suffix:
+				p = '{}.{}'.format(p.rstrip('.'), ci.key_type)
+				if not split_key_file: p += '.pem'
+			p_cert, p_key = ( (p, None) if not split_key_file else
+				('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key']) )
+			dst_cert = ctx.enter_context(safe_replacement(p_cert_dir / p_cert, mode=file_mode))
+			dst_key = ( dst_cert if not p_key else
+				ctx.enter_context(safe_replacement(p_cert_dir / p_key, mode=file_mode)) )
+			files_used.update((p_cert, p_key))
+			ci.files = adict( cert=dst_cert, key=dst_key,
+				path_info=f'{p_cert} / {p_key}' if p_key else str(p_cert) )
+
+		for n, ci in enumerate(certs, 1):
+			cert_str = cert_issue(acc, ci, cert_domain_list, **issue_kws)
+			if not isinstance(cert_str, str): return 1 # error code from wrapper
+			ci.cert_str = cert_str
+			log.debug('Signed cert({}) [{}/{}]', ci.key_type, n, len(certs))
+		acc.hooks.run('cert.issued', *cert_domain_list)
+
+		for ci in certs:
+			key_str = ci.key.private_bytes(
+				cr_hp.serialization.Encoding.PEM,
+				cr_hp.serialization.PrivateFormat.TraditionalOpenSSL,
+				cr_hp.serialization.NoEncryption() ).decode()
+			ci.files.cert.file.write(ci.cert_str); ci.files.key.file.write(key_str)
+			ci.files.cert.commit(); ci.files.key.commit()
+			log.info('Stored {} certificate/key: {}', ci.key_type, ci.files.path_info)
 	acc.hooks.run('cert.stored', *filter(None, files_used))
 
 	if remove_files_for_prefix:
