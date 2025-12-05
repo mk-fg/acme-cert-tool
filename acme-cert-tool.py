@@ -38,7 +38,7 @@ class LogStyleAdapter(logging.LoggerAdapter):
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
 @cl.contextmanager
-def safe_replacement(path, *open_args, mode=None, **open_kws):
+def safe_replacement(path, *open_args, mode=None, auto=True, **open_kws):
 	path = str(path)
 	if mode is None:
 		try: mode = stat.S_IMODE(os.stat(path).st_mode)
@@ -57,7 +57,7 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 				done = True
 			if mode is not None: os.fchmod(tmp.fileno(), mode)
 			yield adict(file=tmp, commit=_commit)
-			_commit()
+			if auto: _commit()
 		finally:
 			try: done or os.unlink(tmp.name)
 			except OSError: pass
@@ -84,8 +84,8 @@ p_err = lambda *a,**k: p(*a, file=sys.stderr, **k) or 1
 
 def retries_within_timeout( tries, timeout,
 		backoff_func=lambda e,n: ((e**n-1)/e), slack=1e-2 ):
-	'Return list of delays to make exactly n tires within timeout, with backoff_func.'
-	a, b = 0, timeout
+	'Return list of delays to make exactly n retries within timeout'
+	a, b = 1, timeout
 	while True:
 		m = (a + b) / 2
 		delays = list(backoff_func(m, n) for n in range(tries))
@@ -621,9 +621,10 @@ def cmd_cert_issue(
 				if not split_key_file: p += '.pem'
 			p_cert, p_key = ( (p, None) if not split_key_file else
 				('{}.{}'.format(p.rstrip('.'), ext) for ext in ['crt', 'key']) )
-			dst_cert = ctx.enter_context(safe_replacement(p_cert_dir / p_cert, mode=file_mode))
-			dst_key = ( dst_cert if not p_key else
-				ctx.enter_context(safe_replacement(p_cert_dir / p_key, mode=file_mode)) )
+			dst_cert = ctx.enter_context(safe_replacement(
+				p_cert_dir / p_cert, mode=file_mode, auto=False ))
+			dst_key = dst_cert if not p_key else ctx.enter_context(
+				safe_replacement(p_cert_dir / p_key, mode=file_mode, auto=False) )
 			files_used.update((p_cert, p_key))
 			ci.files = adict( cert=dst_cert, key=dst_key,
 				path_info=f'{p_cert} / {p_key}' if p_key else str(p_cert) )
