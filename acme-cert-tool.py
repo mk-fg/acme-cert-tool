@@ -701,25 +701,23 @@ def main(args=None):
 
 	group = parser.add_argument_group('ACME service options')
 	group.add_argument('-k', '--account-key-file', metavar='path', help='''
-			Path to ACME domain-specific private key to use (pem with pkcs8/openssl/pkcs1).
-			All operations wrt current domain will be authenticated using this key.
-			It has nothing to do with actual issued TLS certs and cannot be reused in them.
-			Has no default value on purpose, must be explicitly specified.
-			If registered with ACME server, account URL will also be stored in the file alongside key.
-			If --gen-key (or -g/--gen-key-if-missing) is also specified,
-				will be generated and path (incl. directories) will be created.''')
-	group.add_argument('-s', '--acme-service',
-		metavar='url-or-name', default='le-staging', help='''
-			ACME directory URL (or shortcut) of Cert Authority (CA) service to interact with.
-			Available shortcuts: le - Let's Encrypt, le-staging - Let's Encrypt staging server.
-			Default: %(default)s''')
-	group.add_argument('--acme-auth-retries',
-		metavar='n:timeout', default='5:300', help='''
-			Number of authentication retries with exp-backoff to make within
-				specified timeout for defined ACME protocol quirks like nonce-retries.
-			Specific nonce-retry issue is https://tools.ietf.org/html/rfc8555#section-6.5
-				but any other known bugs and similar things will also use this count/timer.
-			Setting this to 0 or empty value will disable such retry logic. Default: %(default)s''')
+		Path to ACME domain-specific private key to use (pem with pkcs8/openssl/pkcs1).
+		All operations wrt current domain will be authenticated using this key.
+		It has nothing to do with actual issued TLS certs and cannot be reused in them.
+		Has no default value on purpose, must be explicitly specified.
+		If registered with ACME server, account URL will also be stored in the file alongside key.
+		If --gen-key (or -g/--gen-key-if-missing) is also specified,
+			will be generated and path (incl. directories) will be created.''')
+	group.add_argument('-s', '--acme-service', metavar='url-or-name', default='le-staging', help='''
+		ACME directory URL (or shortcut) of Cert Authority (CA) service to interact with.
+		Available shortcuts: le - Let's Encrypt, le-staging - Let's Encrypt staging server.
+		Default: %(default)s''')
+	group.add_argument('--acme-auth-retries', metavar='n:timeout', default='5:300', help='''
+		Number of authentication retries with exp-backoff to make within
+			specified timeout for defined ACME protocol quirks like nonce-retries.
+		Specific nonce-retry issue is https://tools.ietf.org/html/rfc8555#section-6.5
+			but any other known bugs and similar things will also use this count/timer.
+		Setting this to 0 or empty value will disable such retry logic. Default: %(default)s''')
 
 	group = parser.add_argument_group('Domain-specific key (-k/--account-key-file) generation',
 		description='Generated keys are always stored in pem/pkcs8 format with no encryption.')
@@ -744,23 +742,21 @@ def main(args=None):
 				' warnings and notifications to register along with the key.'
 			' If was not specified previously or differs from that, will be automatically updated.'
 			' Required for registering new accounts.')
-	group.add_argument('-o', '--account-key-file-old', metavar='path',
-		help='''
-			Issue a key-change command from an old key specified with this option.
-			Can be used for importing account keys from other sources.
-			Overrides -r/--register option - if old key is specified, new one
-				(specified as -k/--account-key-file) will attached to same account as the old one.''')
+	group.add_argument('-o', '--account-key-file-old', metavar='path', help='''
+		Issue a key-change command from an old key specified with this option.
+		Can be used for importing account keys from other sources.
+		Overrides -r/--register option - if old key is specified, new one
+			(specified as -k/--account-key-file) will attached to same account as the old one.''')
 
 	group = parser.add_argument_group('Hook options')
-	group.add_argument('-x', '--hook', action='append', metavar='hook:path',
-		help='''
-			Hook-script to run at the specified point.
-			Specified path must be executable (chmod +x ...), will be run synchronously, and
-				must exit with 0 for tool to continue operation, and non-zero to abort immediately.
-			Hooks are run with same uid/gid and env as the main script, can use PATH-lookup.
-			See --hook-list output to get full list of
-				all supported hook-points and arguments passed to them.
-			Example spec: -x domain-auth.publish-challenge:/etc/nginx/sync-frontends.sh''')
+	group.add_argument('-x', '--hook', action='append', metavar='hook:path', help='''
+		Hook-script to run at the specified point.
+		Specified path must be executable (chmod +x ...), will be run synchronously, and
+			must exit with 0 for tool to continue operation, and non-zero to abort immediately.
+		Hooks are run with same uid/gid and env as the main script, can use PATH-lookup.
+		See --hook-list output to get full list of
+			all supported hook-points and arguments passed to them.
+		Example spec: -x auth.publish-challenge:/etc/nginx/sync-frontends.sh''')
 	group.add_argument('--hook-timeout', metavar='seconds', type=float, default=120,
 		help='Timeout for waiting for hook-script to finish running,'
 				' before aborting the operation (treated as hook error).'
@@ -800,22 +796,21 @@ def main(args=None):
 	group.add_argument('file_prefix',
 		help='Resulting PEM filename or filename prefix'
 			' (if >1 files/certs are requested, see options below).')
-	group.add_argument('-c', '--cert-key-type',
-		action='append', metavar='type', choices=['rsa-2048', 'rsa-4096', 'ec-384'],
-		help='''
+	group.add_argument('-c', '--cert-key-type', action='append',
+		metavar='type', choices=['rsa-2048', 'rsa-4096', 'ec-384'],help='''
 			Certificate key type(s) to generate.
 			Can be used multiple times to issue same certificate for
-			 multiple different keys, e.g. ec-384 cert and a fallback
-			 rsa-2048 one for (rare) clients that do not support ecc.
+				multiple different keys, e.g. ec-384 cert and a fallback
+				rsa-2048 one for (rare) clients that do not support ecc.
 			If more than one key type is specified, each cert/key
-			 pair will be stored to different .pem file(s), with corresponding filename
-			 suffixes and an extra dot separator (if prefix does not end with one),
-			 e.g. "mycert.ec-384.pem" and "mycert.rsa-2048.pem".
+				pair will be stored to different .pem file(s), with corresponding filename
+				suffixes and an extra dot separator (if prefix does not end with one),
+				e.g. "mycert.ec-384.pem" and "mycert.rsa-2048.pem".
 			Possible values: rsa-2048, rsa-4096, ec-384 (secp384r1). Default: ec-384''')
-	group.add_argument('-s', '--split-key-file', action='store_true',
-		help='Store private key in a separate .key file, while certificate to a .crt file, both'
-				' with specified filename prefix plus a dot separator, e.g. "mycert.crt" + "mycert.key".'
-			' Default is to store both cert and key in the same (specified) file.')
+	group.add_argument('-s', '--split-key-file', action='store_true', help='''
+		Store private key in a separate .key file, while certificate to a .crt file, both
+			with specified filename prefix plus a dot separator, e.g. "mycert.crt" + "mycert.key".
+		Default is to store both cert and key in the same (specified) file.''')
 	group.add_argument('-r', '--remove-files-for-prefix', action='store_true',
 		help='After storing new cert/key files, remove all files with specified prefix'
 			' that were there previously. Only done after successful operation,'
@@ -835,21 +830,24 @@ def main(args=None):
 		action='append', metavar='attr:value', help='''
 			Additional attributes to include in the X.509 Name, in attr=value format.
 			This option can be used multiple times, attributes
-			 will be added in the same order with CN from "domain" arg at the end.
+				will be added in the same order with CN from "domain" arg at the end.
 			See list of recognized "attr" names (case-insensitive) in cryptography.io docs:
-			 https://cryptography.io/en/latest/x509/reference/#object-identifiers
+				https://cryptography.io/en/latest/x509/reference/#object-identifiers
 			For example, to have country and email attrs in the cert, use:
-			 -i country_name:US -i  email_address:user@myhost.com''')
+				-i country_name:US -i email_address:user@myhost.com''')
 
 	group = cmd.add_argument_group('Certificate authorization options')
 	group.add_argument('--auth-poll-params', metavar='delay:attempts',
 		help='Specific auth-result polling interval value (if ACME server'
 				' does not provide one, in seconds) and number of attempts to use.'
 			' Default is to use exponential backoff, with 60s limit and 15 attempts max over ~10min.')
-	group.add_argument('--dont-query-local-httpd', action='store_true',
-		help='Skip querying challege response at a local'
-				' "well-known" URLs created by this script before submitting them to ACME CA.'
-			' See more info in the description of this option for "domain-auth" command.')
+	group.add_argument('--dont-query-local-httpd', action='store_true', help='''
+		Skip querying challege response at a local'
+			"well-known" URLs created by this script before submitting them to ACME CA.
+		Default is to query e.g. "example.com/.well-known/acme-challenge/some-token" URL
+			immediately after script creates "some-token" file in acme_dir directory,
+			to make sure it would be accessible to ACME CA servers as well.
+		Can be skipped in configurations where local host should not be able to query that URL.''')
 	group.add_argument('-m', '--challenge-file-mode', metavar='octal', default='0644',
 		help='Separate access mode (octal) value to use for ACME challenge file in acme_dir directory.'
 			' Default is 0644 to allow read access for any uid (e.g. httpd) to these files.')
