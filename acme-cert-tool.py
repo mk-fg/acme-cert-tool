@@ -223,7 +223,7 @@ class AccKey:
 
 class AccMeta(dict):
 
-	re_meta = re.compile(r'^\s*## acme\.(\S+?): (.*)?\s*$')
+	re_meta = re.compile(r'^\s*## acme\.(\S+?): (.*)?\s*\Z')
 
 	__slots__ = 'p mode'.split()
 	def __init__(self, *args, **kws):
@@ -290,7 +290,7 @@ def signed_req_body(acc_key, payload, nonce=None, kid=None, url=None, encode=Tru
 	if not kid: protected['jwk'] = acc_key.jwk
 	else: protected['kid'] = kid
 	if nonce: # only keyChange requires no-nonce payload
-		if not re.search(r'^[-_a-zA-Z0-9]+$', nonce):
+		if not re.fullmatch(r'[-_a-zA-Z0-9]+', nonce):
 			# rfc8555#section-6.5.1 says that client MUST validate nonce
 			raise ACMEError(f'Invalid nonce format: {nonce}')
 		protected['nonce'] = nonce
@@ -426,7 +426,7 @@ def acme_auth_retry(func, *args, retry_n=0, retry_timeout=0, **kws):
 def acme_auth_poll_delay(n, poll_interval, retry_delay=None, delay_hook=None):
 	'Sleep according to Retry-After response header value (retry_delay) or poll_interval.'
 	if retry_delay and (retry_delay := str(retry_delay).strip()):
-		if re.search(r'^[-+\d.]+$', retry_delay): retry_delay = float(retry_delay)
+		if re.search(r'^[-+\d.]+\Z', retry_delay): retry_delay = float(retry_delay)
 		else:
 			retry_delay = email.utils.parsedate_to_datetime(retry_delay)
 			if retry_delay: retry_delay = retry_delay.timestamp() - time.time()
